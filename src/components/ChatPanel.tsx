@@ -1,4 +1,4 @@
-import { Bot, Loader2, MessageSquare } from 'lucide-react';
+import { Bot, Brain, Loader2, MessageSquare, NotebookPen } from 'lucide-react';
 import type { ChatMessage, Conversation, Note } from '../types';
 import { modelStatusText, providerDisplayName } from '../services/settings';
 import type { AiSettings } from '../types';
@@ -8,19 +8,24 @@ export function ChatPanel({
   conversation,
   chatInput,
   isAsking,
+  isDistilling,
   settings,
   onChatInputChange,
-  onAsk
+  onAsk,
+  onDistillToNote
 }: {
   selectedNote: Note | null;
   conversation: Conversation | null;
   chatInput: string;
   isAsking: boolean;
+  isDistilling: boolean;
   settings: AiSettings;
   onChatInputChange: (value: string) => void;
   onAsk: () => void;
+  onDistillToNote: () => void;
 }) {
   const messages = conversation?.messages || [];
+  const hasMemory = Boolean(conversation?.memorySummary?.trim());
 
   return (
     <aside className="chat-panel">
@@ -53,6 +58,22 @@ export function ChatPanel({
             <span>围绕当前笔记提问，Bot 会引用相关片段回答。</span>
           </div>
         )}
+      </div>
+
+      <div className="chat-tools">
+        <div className={`memory-chip ${hasMemory ? 'active' : ''}`} title={hasMemory ? conversation?.memorySummary : '对话达到一定长度后会自动生成阶段性记忆'}>
+          <Brain size={15} />
+          <span>{hasMemory ? '阶段记忆已启用' : '等待对话记忆'}</span>
+        </div>
+        <button
+          className="secondary-action chat-tool-action"
+          onClick={onDistillToNote}
+          disabled={!selectedNote || messages.length < 2 || isAsking || isDistilling}
+          title="总结当前对话并把重要内容补充到笔记"
+        >
+          {isDistilling ? <Loader2 className="spin" size={16} /> : <NotebookPen size={16} />}
+          补充到笔记
+        </button>
       </div>
 
       <div className="chat-input">

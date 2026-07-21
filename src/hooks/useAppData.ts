@@ -17,10 +17,11 @@ export function useAppData() {
         const merged: AppData = {
           ...emptyData,
           ...loaded,
+          usageRecords: loaded.usageRecords || [],
           settings: { ...emptyData.settings, ...loaded.settings }
         };
         setData(merged);
-        setSelectedNoteId(merged.notes[0]?.id || '');
+        setSelectedNoteId('');
         setDataPath(filePath);
         setIsReady(true);
       })

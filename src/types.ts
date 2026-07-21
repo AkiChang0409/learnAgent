@@ -11,6 +11,33 @@ export interface AiSettings {
   lastTestMessage?: string;
 }
 
+export type TokenUsageOperation =
+  | 'generate-note'
+  | 'import-markdown'
+  | 'chat-with-note'
+  | 'summarize-conversation'
+  | 'distill-conversation-to-note'
+  | 'test-connection'
+  | 'unknown';
+
+export interface TokenUsageRecord {
+  id: string;
+  createdAt: string;
+  operation: TokenUsageOperation;
+  provider: AiProvider | string;
+  endpoint: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+  reasoningTokens: number;
+  estimatedCostUsd: number | null;
+  currency: 'usd' | string;
+  priceSource: string;
+  responseId: string;
+}
+
 export interface NoteSection {
   id: string;
   heading: string;
@@ -19,6 +46,8 @@ export interface NoteSection {
 
 export interface Note {
   id: string;
+  parentId?: string;
+  position?: number;
   title: string;
   subject: string;
   topic: string;
@@ -30,6 +59,9 @@ export interface Note {
   interviewQuestions: string[];
   createdAt: string;
   updatedAt: string;
+  searchExcerpt?: string;
+  searchSection?: string;
+  searchScore?: number;
 }
 
 export interface ChatMessage {
@@ -45,6 +77,9 @@ export interface Conversation {
   noteId: string;
   title: string;
   messages: ChatMessage[];
+  memorySummary?: string;
+  memoryUpdatedAt?: string;
+  summarizedMessageCount?: number;
   updatedAt: string;
 }
 
@@ -52,6 +87,7 @@ export interface AppData {
   schemaVersion?: number;
   notes: Note[];
   conversations: Conversation[];
+  usageRecords: TokenUsageRecord[];
   settings: AiSettings;
 }
 
@@ -71,6 +107,21 @@ export interface GeneratedNoteResult {
   draft: GeneratedNoteDraft;
   usedFallback: boolean;
   message: string;
+  usageRecord?: TokenUsageRecord | null;
+}
+
+export interface MarkdownImportNoteDraft extends GeneratedNoteDraft {
+  subNotes?: GeneratedNoteDraft[];
+}
+
+export interface MarkdownImportResult {
+  canceled?: boolean;
+  filePath?: string;
+  fileName?: string;
+  root?: MarkdownImportNoteDraft;
+  usedFallback?: boolean;
+  message?: string;
+  usageRecord?: TokenUsageRecord | null;
 }
 
 export interface RagSource {
@@ -81,31 +132,104 @@ export interface RagSource {
   score: number;
 }
 
+export interface RagContextResult {
+  context: string;
+  sources: RagSource[];
+}
+
 export interface AiConnectionTestResult {
   ok: boolean;
   message: string;
   testedAt: string;
+  usageRecord?: TokenUsageRecord | null;
 }
 
 export interface ChatResult {
   content: string;
   usedFallback: boolean;
   message: string;
+  usageRecord?: TokenUsageRecord | null;
+}
+
+export interface ConversationMemoryResult {
+  memorySummary: string;
+  usedFallback: boolean;
+  message: string;
+  usageRecord?: TokenUsageRecord | null;
+}
+
+export interface NoteDistillationPatch {
+  summaryAppend: string;
+  sections: Array<{ heading: string; content: string }>;
+  tags: string[];
+  cases: string[];
+  pitfalls: string[];
+  interviewQuestions: string[];
+}
+
+export interface NoteDistillationResult {
+  patch: NoteDistillationPatch;
+  memorySummary: string;
+  usedFallback: boolean;
+  message: string;
+  usageRecord?: TokenUsageRecord | null;
+}
+
+export interface SyncExportResult {
+  ok: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  summary?: {
+    notes: number;
+    conversations: number;
+    usageRecords: number;
+  };
+}
+
+export interface SyncImportResult {
+  ok: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  data?: AppData;
+  summary?: {
+    notesAdded: number;
+    notesUpdated: number;
+    conversationsAdded: number;
+    conversationsUpdated: number;
+    usageRecordsAdded: number;
+  };
 }
 
 export interface LearnAgentBridge {
   loadData: () => Promise<AppData>;
   saveData: (data: AppData) => Promise<{ ok: boolean; filePath: string }>;
   searchNotes: (query: string) => Promise<Note[]>;
+  retrieveContext: (payload: { question: string; currentNote: Note; limit?: number }) => Promise<RagContextResult>;
+  exportSyncPackage: () => Promise<SyncExportResult>;
+  importSyncPackage: () => Promise<SyncImportResult>;
   generateNote: (payload: { input: string; settings: AiSettings }) => Promise<GeneratedNoteResult>;
+  importMarkdown: (payload: { settings: AiSettings }) => Promise<MarkdownImportResult>;
   chatWithNote: (payload: {
     question: string;
     note: Note;
     context: string;
     sources: RagSource[];
     history: ChatMessage[];
+    memorySummary?: string;
     settings: AiSettings;
   }) => Promise<ChatResult>;
+  summarizeConversation: (payload: {
+    note: Note;
+    previousSummary?: string;
+    messages: ChatMessage[];
+    settings: AiSettings;
+  }) => Promise<ConversationMemoryResult>;
+  distillConversationToNote: (payload: {
+    note: Note;
+    memorySummary?: string;
+    messages: ChatMessage[];
+    settings: AiSettings;
+  }) => Promise<NoteDistillationResult>;
   testConnection: (payload: { settings: AiSettings }) => Promise<AiConnectionTestResult>;
   getDataFilePath: () => Promise<string>;
 }

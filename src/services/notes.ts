@@ -1,9 +1,10 @@
-import type { AppData, GeneratedNoteDraft, Note } from '../types';
+import type { AppData, GeneratedNoteDraft, MarkdownImportNoteDraft, Note } from '../types';
 
 export const emptyData: AppData = {
-  schemaVersion: 1,
+  schemaVersion: 3,
   notes: [],
   conversations: [],
+  usageRecords: [],
   settings: {
     provider: 'local',
     endpoint: 'https://api.openai.com/v1/chat/completions',
@@ -45,6 +46,16 @@ export function draftToNote(draft: GeneratedNoteDraft): Note {
     createdAt: now,
     updatedAt: now
   };
+}
+
+export function markdownDraftToNotes(draft: MarkdownImportNoteDraft): Note[] {
+  const root = draftToNote(draft);
+  const subNotes = (draft.subNotes || []).map((subDraft, index) => ({
+    ...draftToNote(subDraft),
+    parentId: root.id,
+    position: index
+  }));
+  return [root, ...subNotes];
 }
 
 export function normalizeList(values: unknown) {

@@ -1,20 +1,24 @@
-import { FileText, Loader2, Mic, MicOff } from 'lucide-react';
+import { FileText, Loader2, Mic, MicOff, Upload } from 'lucide-react';
 
 export function ComposerPanel({
   composer,
   isGenerating,
+  isImportingMarkdown,
   isListening,
   voiceError,
   onComposerChange,
   onGenerate,
+  onImportMarkdown,
   onToggleListening
 }: {
   composer: string;
   isGenerating: boolean;
+  isImportingMarkdown: boolean;
   isListening: boolean;
   voiceError: string;
   onComposerChange: (value: string) => void;
   onGenerate: () => void;
+  onImportMarkdown: () => void;
   onToggleListening: () => void;
 }) {
   return (
@@ -34,6 +38,10 @@ export function ComposerPanel({
           {isListening ? <MicOff size={18} /> : <Mic size={18} />}
         </button>
         {voiceError && <span className="voice-error">{voiceError}</span>}
+        <button className="secondary-action" onClick={onImportMarkdown} disabled={isImportingMarkdown || isGenerating}>
+          {isImportingMarkdown ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
+          导入 MD
+        </button>
         <button className="primary-action" onClick={onGenerate} disabled={!composer.trim() || isGenerating}>
           {isGenerating ? <Loader2 className="spin" size={18} /> : <FileText size={18} />}
           生成知识总结
