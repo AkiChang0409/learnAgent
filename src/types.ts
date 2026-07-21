@@ -1,10 +1,14 @@
 export type AiProvider = 'local' | 'openai-compatible' | 'ollama';
+export type AiTestStatus = 'idle' | 'success' | 'error';
 
 export interface AiSettings {
   provider: AiProvider;
   endpoint: string;
   model: string;
   apiKey: string;
+  lastTestedAt?: string;
+  lastTestStatus?: AiTestStatus;
+  lastTestMessage?: string;
 }
 
 export interface NoteSection {
@@ -45,6 +49,7 @@ export interface Conversation {
 }
 
 export interface AppData {
+  schemaVersion?: number;
   notes: Note[];
   conversations: Conversation[];
   settings: AiSettings;
@@ -62,6 +67,12 @@ export interface GeneratedNoteDraft {
   interviewQuestions: string[];
 }
 
+export interface GeneratedNoteResult {
+  draft: GeneratedNoteDraft;
+  usedFallback: boolean;
+  message: string;
+}
+
 export interface RagSource {
   noteId: string;
   title: string;
@@ -70,10 +81,23 @@ export interface RagSource {
   score: number;
 }
 
+export interface AiConnectionTestResult {
+  ok: boolean;
+  message: string;
+  testedAt: string;
+}
+
+export interface ChatResult {
+  content: string;
+  usedFallback: boolean;
+  message: string;
+}
+
 export interface LearnAgentBridge {
   loadData: () => Promise<AppData>;
   saveData: (data: AppData) => Promise<{ ok: boolean; filePath: string }>;
-  generateNote: (payload: { input: string; settings: AiSettings }) => Promise<GeneratedNoteDraft>;
+  searchNotes: (query: string) => Promise<Note[]>;
+  generateNote: (payload: { input: string; settings: AiSettings }) => Promise<GeneratedNoteResult>;
   chatWithNote: (payload: {
     question: string;
     note: Note;
@@ -81,7 +105,8 @@ export interface LearnAgentBridge {
     sources: RagSource[];
     history: ChatMessage[];
     settings: AiSettings;
-  }) => Promise<string>;
+  }) => Promise<ChatResult>;
+  testConnection: (payload: { settings: AiSettings }) => Promise<AiConnectionTestResult>;
   getDataFilePath: () => Promise<string>;
 }
 

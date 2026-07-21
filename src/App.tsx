@@ -1,80 +1,51 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ArrowDown,
-  ArrowUp,
-  Bot,
-  Check,
-  FileText,
-  Loader2,
-  MessageSquare,
-  Mic,
-  MicOff,
-  Plus,
-  Save,
-  Search,
-  Settings,
-  Trash2
-} from 'lucide-react';
-import type { AiProvider, AppData, ChatMessage, Note, NoteSection } from './types';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Loader2 } from 'lucide-react';
+import type { AiSettings, ChatMessage, Note, NoteSection } from './types';
+import { ChatPanel } from './components/ChatPanel';
+import { ComposerPanel } from './components/ComposerPanel';
+import { NoteEditor, type ListField } from './components/NoteEditor';
+import { SettingsModal } from './components/SettingsModal';
+import { Sidebar } from './components/Sidebar';
+import { ToastHost, type ToastMessage } from './components/ToastHost';
+import { useAppData } from './hooks/useAppData';
+import { useAutosave } from './hooks/useAutosave';
+import { useSpeechRecognition } from './hooks/useSpeechRecognition';
+import { createId, draftToNote, nowIso } from './services/notes';
 import { retrieveContext } from './services/rag';
-import { createId, draftToNote, emptyData, formatDate, nowIso } from './services/notes';
 
-type ListField = 'cases' | 'pitfalls' | 'interviewQuestions';
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : '未知错误';
+}
 
 export default function App() {
-  const [data, setData] = useState<AppData>(emptyData);
-  const [selectedNoteId, setSelectedNoteId] = useState<string>('');
+  const { data, setData, selectedNoteId, setSelectedNoteId, dataPath, isReady, loadError } = useAppData();
   const [composer, setComposer] = useState('');
   const [noteSearch, setNoteSearch] = useState('');
+  const [searchResults, setSearchResults] = useState<Note[]>([]);
   const [chatInput, setChatInput] = useState('');
-  const [isReady, setIsReady] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAsking, setIsAsking] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [voiceError, setVoiceError] = useState('');
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
-  const [dataPath, setDataPath] = useState('');
+  const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const saveTimer = useRef<number | undefined>(undefined);
-  const recognitionRef = useRef<import('./types').SpeechRecognition | null>(null);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
-  useEffect(() => {
-    let mounted = true;
-    Promise.all([window.learnAgent.loadData(), window.learnAgent.getDataFilePath()])
-      .then(([loaded, filePath]) => {
-        if (!mounted) return;
-        const merged = {
-          ...emptyData,
-          ...loaded,
-          settings: { ...emptyData.settings, ...loaded.settings }
-        };
-        setData(merged);
-        setSelectedNoteId(merged.notes[0]?.id || '');
-        setDataPath(filePath);
-        setIsReady(true);
-      })
-      .catch(() => {
-        if (!mounted) return;
-        setData(emptyData);
-        setIsReady(true);
-      });
-    return () => {
-      mounted = false;
-    };
+  const pushToast = useCallback((type: ToastMessage['type'], message: string) => {
+    const id = createId('toast');
+    setToasts((current) => [...current, { id, type, message }].slice(-4));
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 5200);
   }, []);
 
   useEffect(() => {
-    if (!isReady) return;
-    window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => {
-      setSaveState('saving');
-      window.learnAgent.saveData(data).then(() => {
-        setSaveState('saved');
-        window.setTimeout(() => setSaveState('idle'), 1400);
-      });
-    }, 450);
-    return () => window.clearTimeout(saveTimer.current);
-  }, [data, isReady]);
+    if (loadError) pushToast('error', loadError);
+  }, [loadError, pushToast]);
+
+  const saveState = useAutosave(data, isReady, (message) => pushToast('error', message));
+
+  const { isListening, voiceError, toggleListening } = useSpeechRecognition((text) => {
+    setComposer((current) => `${current}${current ? ' ' : ''}${text}`.trim());
+  });
 
   const selectedNote = useMemo(
     () => data.notes.find((note) => note.id === selectedNoteId) || null,
@@ -86,16 +57,37 @@ export default function App() {
     [data.conversations, selectedNoteId]
   );
 
+  useEffect(() => {
+    const query = noteSearch.trim();
+    if (!query) {
+      setSearchResults([]);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      window.learnAgent
+        .searchNotes(query)
+        .then(setSearchResults)
+        .catch((error) => {
+          pushToast('error', `搜索失败，已使用本地过滤：${errorMessage(error)}`);
+          const fallback = data.notes.filter((note) =>
+            [note.title, note.subject, note.topic, note.summary, note.tags.join(' ')]
+              .join(' ')
+              .toLowerCase()
+              .includes(query.toLowerCase())
+          );
+          setSearchResults(fallback);
+        });
+    }, 220);
+
+    return () => window.clearTimeout(timer);
+  }, [data.notes, noteSearch, pushToast]);
+
   const filteredNotes = useMemo(() => {
     const query = noteSearch.trim().toLowerCase();
     if (!query) return data.notes;
-    return data.notes.filter((note) =>
-      [note.title, note.subject, note.topic, note.summary, note.tags.join(' ')]
-        .join(' ')
-        .toLowerCase()
-        .includes(query)
-    );
-  }, [data.notes, noteSearch]);
+    return searchResults;
+  }, [data.notes, noteSearch, searchResults]);
 
   function updateSelectedNote(mutator: (note: Note) => Note) {
     if (!selectedNoteId) return;
@@ -112,8 +104,8 @@ export default function App() {
     if (!input || isGenerating) return;
     setIsGenerating(true);
     try {
-      const draft = await window.learnAgent.generateNote({ input, settings: data.settings });
-      const note = draftToNote(draft);
+      const result = await window.learnAgent.generateNote({ input, settings: data.settings });
+      const note = draftToNote(result.draft);
       const conversation = {
         id: createId('conversation'),
         noteId: note.id,
@@ -128,6 +120,9 @@ export default function App() {
       }));
       setSelectedNoteId(note.id);
       setComposer('');
+      pushToast(result.usedFallback ? 'info' : 'success', result.message || '已生成知识总结');
+    } catch (error) {
+      pushToast('error', `生成失败：${errorMessage(error)}`);
     } finally {
       setIsGenerating(false);
     }
@@ -158,6 +153,7 @@ export default function App() {
       ]
     }));
     setSelectedNoteId(note.id);
+    pushToast('success', '已创建空白笔记');
   }
 
   function deleteSelectedNote() {
@@ -169,6 +165,7 @@ export default function App() {
       conversations: current.conversations.filter((conversation) => conversation.noteId !== selectedNote.id)
     }));
     setSelectedNoteId(remaining[0]?.id || '');
+    pushToast('info', '笔记已删除');
   }
 
   function updateSection(sectionId: string, patch: Partial<NoteSection>) {
@@ -254,7 +251,7 @@ export default function App() {
     setChatInput('');
     setIsAsking(true);
     try {
-      const answer = await window.learnAgent.chatWithNote({
+      const result = await window.learnAgent.chatWithNote({
         question,
         note: selectedNote,
         context,
@@ -265,51 +262,49 @@ export default function App() {
       const assistantMessage: ChatMessage = {
         id: createId('message'),
         role: 'assistant',
-        content: answer,
+        content: result.content,
         createdAt: nowIso(),
         sources
       };
       updateConversationMessages(selectedNote.id, (messages) => [...messages, assistantMessage]);
+      if (result.usedFallback) pushToast('info', result.message);
+    } catch (error) {
+      pushToast('error', `对话失败：${errorMessage(error)}`);
     } finally {
       setIsAsking(false);
     }
   }
 
-  function toggleListening() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setVoiceError('当前运行环境不支持语音识别');
-      return;
+  function updateSettings(settings: AiSettings) {
+    setData((current) => ({ ...current, settings }));
+  }
+
+  async function testConnection() {
+    if (isTestingConnection) return;
+    setIsTestingConnection(true);
+    try {
+      const result = await window.learnAgent.testConnection({ settings: data.settings });
+      const nextSettings: AiSettings = {
+        ...data.settings,
+        lastTestedAt: result.testedAt,
+        lastTestStatus: result.ok ? 'success' : 'error',
+        lastTestMessage: result.message
+      };
+      updateSettings(nextSettings);
+      pushToast(result.ok ? 'success' : 'error', result.message);
+    } catch (error) {
+      const testedAt = nowIso();
+      const message = `连接测试失败：${errorMessage(error)}`;
+      updateSettings({
+        ...data.settings,
+        lastTestedAt: testedAt,
+        lastTestStatus: 'error',
+        lastTestMessage: message
+      });
+      pushToast('error', message);
+    } finally {
+      setIsTestingConnection(false);
     }
-    if (isListening) {
-      recognitionRef.current?.stop();
-      return;
-    }
-    const recognition = new SpeechRecognition();
-    recognitionRef.current = recognition;
-    recognition.lang = 'zh-CN';
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.onstart = () => {
-      setVoiceError('');
-      setIsListening(true);
-    };
-    recognition.onend = () => setIsListening(false);
-    recognition.onerror = (event) => {
-      setVoiceError(event.error || '语音识别失败');
-      setIsListening(false);
-    };
-    recognition.onresult = (event) => {
-      let finalText = '';
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        if (result.isFinal) finalText += result[0].transcript;
-      }
-      if (finalText) {
-        setComposer((current) => `${current}${current ? ' ' : ''}${finalText}`.trim());
-      }
-    };
-    recognition.start();
   }
 
   if (!isReady) {
@@ -322,366 +317,66 @@ export default function App() {
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="brand-row">
-          <div>
-            <h1>LearnAgent</h1>
-            <span>{data.notes.length} 篇笔记</span>
-          </div>
-          <button className="icon-button" title="设置" aria-label="设置" onClick={() => setShowSettings(true)}>
-            <Settings size={18} />
-          </button>
-        </div>
-
-        <div className="search-box">
-          <Search size={16} />
-          <input value={noteSearch} onChange={(event) => setNoteSearch(event.target.value)} placeholder="搜索笔记" />
-        </div>
-
-        <button className="primary-wide" onClick={createBlankNote}>
-          <Plus size={17} />
-          新笔记
-        </button>
-
-        <div className="note-list">
-          {filteredNotes.map((note) => (
-            <button
-              key={note.id}
-              className={`note-list-item ${note.id === selectedNoteId ? 'active' : ''}`}
-              onClick={() => setSelectedNoteId(note.id)}
-            >
-              <span className="note-title">{note.title}</span>
-              <span className="note-meta">
-                {note.subject} · {formatDate(note.updatedAt)}
-              </span>
-            </button>
-          ))}
-          {!filteredNotes.length && <p className="empty-copy">暂无笔记</p>}
-        </div>
-
-        <div className="save-status">
-          {saveState === 'saving' && <Loader2 className="spin" size={14} />}
-          {saveState === 'saved' && <Check size={14} />}
-          <span>{saveState === 'saving' ? '保存中' : saveState === 'saved' ? '已保存' : '本地存储'}</span>
-        </div>
-      </aside>
+      <Sidebar
+        notes={data.notes}
+        filteredNotes={filteredNotes}
+        selectedNoteId={selectedNoteId}
+        noteSearch={noteSearch}
+        saveState={saveState}
+        onSearchChange={setNoteSearch}
+        onSelectNote={setSelectedNoteId}
+        onCreateBlankNote={createBlankNote}
+        onOpenSettings={() => setShowSettings(true)}
+      />
 
       <section className="workspace">
-        <section className="composer-panel">
-          <textarea
-            value={composer}
-            onChange={(event) => setComposer(event.target.value)}
-            placeholder="输入今天学习的主题，例如：今天学了操作系统里的虚拟内存和页面置换算法"
-          />
-          <div className="composer-actions">
-            <button className={`icon-button ${isListening ? 'danger' : ''}`} title="语音输入" aria-label="语音输入" onClick={toggleListening}>
-              {isListening ? <MicOff size={18} /> : <Mic size={18} />}
-            </button>
-            {voiceError && <span className="voice-error">{voiceError}</span>}
-            <button className="primary-action" onClick={generateNote} disabled={!composer.trim() || isGenerating}>
-              {isGenerating ? <Loader2 className="spin" size={18} /> : <FileText size={18} />}
-              生成知识总结
-            </button>
-          </div>
-        </section>
+        <ComposerPanel
+          composer={composer}
+          isGenerating={isGenerating}
+          isListening={isListening}
+          voiceError={voiceError}
+          onComposerChange={setComposer}
+          onGenerate={generateNote}
+          onToggleListening={toggleListening}
+        />
 
-        {selectedNote ? (
-          <NoteEditor
-            note={selectedNote}
-            onChange={(patch) => updateSelectedNote((note) => ({ ...note, ...patch }))}
-            onDelete={deleteSelectedNote}
-            onAddSection={addSection}
-            onUpdateSection={updateSection}
-            onRemoveSection={removeSection}
-            onMoveSection={moveSection}
-            onUpdateList={updateList}
-          />
-        ) : (
-          <section className="empty-note">
-            <FileText size={34} />
-            <h2>还没有笔记</h2>
-          </section>
-        )}
+        <NoteEditor
+          note={selectedNote}
+          onChange={(patch) => updateSelectedNote((note) => ({ ...note, ...patch }))}
+          onDelete={deleteSelectedNote}
+          onAddSection={addSection}
+          onUpdateSection={updateSection}
+          onRemoveSection={removeSection}
+          onMoveSection={moveSection}
+          onUpdateList={updateList}
+        />
       </section>
 
-      <aside className="chat-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">RAG Bot</span>
-            <h2>当前笔记对话</h2>
-          </div>
-          <Bot size={22} />
-        </div>
-
-        <div className="message-list">
-          {(selectedConversation?.messages || []).map((message) => (
-            <article key={message.id} className={`message ${message.role}`}>
-              <div className="message-content">{message.content}</div>
-              {message.sources?.length ? (
-                <details>
-                  <summary>引用片段</summary>
-                  {message.sources.slice(0, 3).map((source) => (
-                    <p key={`${source.noteId}-${source.section}-${source.score}`}>
-                      {source.title} / {source.section}: {source.excerpt}
-                    </p>
-                  ))}
-                </details>
-              ) : null}
-            </article>
-          ))}
-          {isAsking && (
-            <article className="message assistant pending">
-              <Loader2 className="spin" size={16} />
-              <span>思考中</span>
-            </article>
-          )}
-          {!selectedConversation?.messages.length && (
-            <div className="chat-empty">
-              <MessageSquare size={28} />
-            </div>
-          )}
-        </div>
-
-        <div className="chat-input">
-          <textarea
-            value={chatInput}
-            onChange={(event) => setChatInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                askBot();
-              }
-            }}
-            placeholder="问当前笔记"
-            disabled={!selectedNote}
-          />
-          <button className="primary-action compact" onClick={askBot} disabled={!selectedNote || !chatInput.trim() || isAsking}>
-            <MessageSquare size={17} />
-            发送
-          </button>
-        </div>
-      </aside>
+      <ChatPanel
+        selectedNote={selectedNote}
+        conversation={selectedConversation}
+        chatInput={chatInput}
+        isAsking={isAsking}
+        settings={data.settings}
+        onChatInputChange={setChatInput}
+        onAsk={askBot}
+      />
 
       {showSettings && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setShowSettings(false)}>
-          <section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">Settings</span>
-                <h2>模型与存储</h2>
-              </div>
-              <button className="icon-button" onClick={() => setShowSettings(false)} aria-label="关闭设置" title="关闭设置">
-                <Check size={18} />
-              </button>
-            </div>
-
-            <label>
-              <span>AI Provider</span>
-              <select
-                value={data.settings.provider}
-                onChange={(event) =>
-                  setData((current) => ({
-                    ...current,
-                    settings: { ...current.settings, provider: event.target.value as AiProvider }
-                  }))
-                }
-              >
-                <option value="local">Local fallback</option>
-                <option value="openai-compatible">OpenAI-compatible</option>
-                <option value="ollama">Ollama</option>
-              </select>
-            </label>
-
-            <label>
-              <span>Endpoint</span>
-              <input
-                value={data.settings.endpoint}
-                onChange={(event) =>
-                  setData((current) => ({
-                    ...current,
-                    settings: { ...current.settings, endpoint: event.target.value }
-                  }))
-                }
-              />
-            </label>
-
-            <label>
-              <span>Model</span>
-              <input
-                value={data.settings.model}
-                onChange={(event) =>
-                  setData((current) => ({
-                    ...current,
-                    settings: { ...current.settings, model: event.target.value }
-                  }))
-                }
-              />
-            </label>
-
-            <label>
-              <span>API Key</span>
-              <input
-                type="password"
-                value={data.settings.apiKey}
-                onChange={(event) =>
-                  setData((current) => ({
-                    ...current,
-                    settings: { ...current.settings, apiKey: event.target.value }
-                  }))
-                }
-              />
-            </label>
-
-            <div className="data-path">
-              <Save size={16} />
-              <span>{dataPath}</span>
-            </div>
-          </section>
-        </div>
+        <SettingsModal
+          settings={data.settings}
+          dataPath={dataPath}
+          isTesting={isTestingConnection}
+          onClose={() => setShowSettings(false)}
+          onChange={updateSettings}
+          onTestConnection={testConnection}
+        />
       )}
+
+      <ToastHost
+        toasts={toasts}
+        onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
+      />
     </main>
-  );
-}
-
-function NoteEditor({
-  note,
-  onChange,
-  onDelete,
-  onAddSection,
-  onUpdateSection,
-  onRemoveSection,
-  onMoveSection,
-  onUpdateList
-}: {
-  note: Note;
-  onChange: (patch: Partial<Note>) => void;
-  onDelete: () => void;
-  onAddSection: () => void;
-  onUpdateSection: (sectionId: string, patch: Partial<NoteSection>) => void;
-  onRemoveSection: (sectionId: string) => void;
-  onMoveSection: (sectionId: string, direction: -1 | 1) => void;
-  onUpdateList: (field: ListField, values: string[]) => void;
-}) {
-  return (
-    <article className="note-page">
-      <div className="note-toolbar">
-        <div className="subject-pill">{note.subject}</div>
-        <button className="icon-button danger" onClick={onDelete} title="删除笔记" aria-label="删除笔记">
-          <Trash2 size={17} />
-        </button>
-      </div>
-
-      <input className="title-input" value={note.title} onChange={(event) => onChange({ title: event.target.value })} />
-
-      <div className="field-grid">
-        <label>
-          <span>学科</span>
-          <input value={note.subject} onChange={(event) => onChange({ subject: event.target.value })} />
-        </label>
-        <label>
-          <span>主题</span>
-          <input value={note.topic} onChange={(event) => onChange({ topic: event.target.value })} />
-        </label>
-      </div>
-
-      <label className="full-field">
-        <span>标签</span>
-        <input
-          value={note.tags.join('，')}
-          onChange={(event) =>
-            onChange({
-              tags: event.target.value
-                .split(/[，,、]/)
-                .map((tag) => tag.trim())
-                .filter(Boolean)
-            })
-          }
-        />
-      </label>
-
-      <label className="full-field">
-        <span>知识总结</span>
-        <textarea value={note.summary} onChange={(event) => onChange({ summary: event.target.value })} />
-      </label>
-
-      <div className="section-heading">
-        <h3>主题编排</h3>
-        <button className="secondary-action" onClick={onAddSection}>
-          <Plus size={16} />
-          小节
-        </button>
-      </div>
-
-      <div className="sections">
-        {note.sections.map((section, index) => (
-          <section className="note-section" key={section.id}>
-            <div className="section-controls">
-              <input value={section.heading} onChange={(event) => onUpdateSection(section.id, { heading: event.target.value })} />
-              <button className="icon-button" onClick={() => onMoveSection(section.id, -1)} disabled={index === 0} aria-label="上移小节" title="上移小节">
-                <ArrowUp size={16} />
-              </button>
-              <button className="icon-button" onClick={() => onMoveSection(section.id, 1)} disabled={index === note.sections.length - 1} aria-label="下移小节" title="下移小节">
-                <ArrowDown size={16} />
-              </button>
-              <button className="icon-button danger" onClick={() => onRemoveSection(section.id)} aria-label="删除小节" title="删除小节">
-                <Trash2 size={16} />
-              </button>
-            </div>
-            <textarea value={section.content} onChange={(event) => onUpdateSection(section.id, { content: event.target.value })} />
-          </section>
-        ))}
-      </div>
-
-      <div className="insight-grid">
-        <EditableList title="案例" values={note.cases} onChange={(values) => onUpdateList('cases', values)} placeholder="添加案例" />
-        <EditableList title="易错" values={note.pitfalls} onChange={(values) => onUpdateList('pitfalls', values)} placeholder="添加易错点" />
-        <EditableList
-          title="面试问题"
-          values={note.interviewQuestions}
-          onChange={(values) => onUpdateList('interviewQuestions', values)}
-          placeholder="添加问题"
-        />
-      </div>
-    </article>
-  );
-}
-
-function EditableList({
-  title,
-  values,
-  onChange,
-  placeholder
-}: {
-  title: string;
-  values: string[];
-  onChange: (values: string[]) => void;
-  placeholder: string;
-}) {
-  return (
-    <section className="list-editor">
-      <div className="section-heading compact-heading">
-        <h3>{title}</h3>
-        <button className="icon-button" onClick={() => onChange([...values, ''])} title={placeholder} aria-label={placeholder}>
-          <Plus size={16} />
-        </button>
-      </div>
-      {values.map((value, index) => (
-        <div className="list-row" key={`${title}-${index}`}>
-          <textarea
-            value={value}
-            onChange={(event) => {
-              const next = [...values];
-              next[index] = event.target.value;
-              onChange(next);
-            }}
-            placeholder={placeholder}
-          />
-          <button className="icon-button danger" onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))} title="删除" aria-label="删除">
-            <Trash2 size={15} />
-          </button>
-        </div>
-      ))}
-      {!values.length && <p className="empty-copy">暂无内容</p>}
-    </section>
   );
 }

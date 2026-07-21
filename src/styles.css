@@ -131,6 +131,7 @@ textarea {
 .eyebrow,
 .empty-copy,
 .save-status,
+.model-status,
 .voice-error {
   color: #6d675e;
   font-size: 12px;
@@ -251,6 +252,10 @@ textarea {
   margin-top: auto;
   height: 32px;
   gap: 8px;
+}
+
+.save-status.error {
+  color: #9c3d2e;
 }
 
 .workspace {
@@ -439,6 +444,11 @@ label select,
   font-size: 18px;
 }
 
+.empty-note p {
+  margin: 0;
+  font-size: 13px;
+}
+
 .chat-panel {
   padding: 18px;
 }
@@ -455,6 +465,32 @@ label select,
   text-transform: uppercase;
   font-weight: 800;
   letter-spacing: 0;
+}
+
+.model-status {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0 4px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #d8d0c2;
+  background: #fffdf8;
+}
+
+.model-status strong {
+  color: #31312c;
+  font-size: 13px;
+}
+
+.model-status.success {
+  border-color: #b6d8d2;
+  background: #ecf6f3;
+}
+
+.model-status.error {
+  color: #8f2f24;
+  border-color: #efc5bb;
+  background: #fff4f0;
 }
 
 .message-list {
@@ -503,11 +539,39 @@ label select,
   margin: 8px 0 0;
 }
 
+.source-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.source-list p {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid #e4ddd1;
+  border-radius: 6px;
+  background: #faf8f1;
+}
+
+.source-list strong {
+  color: #31312c;
+}
+
 .chat-empty {
   height: 220px;
   display: grid;
   place-items: center;
+  align-content: center;
+  gap: 10px;
   color: #9a9285;
+  text-align: center;
+}
+
+.chat-empty span {
+  max-width: 220px;
+  font-size: 13px;
 }
 
 .chat-input {
@@ -533,7 +597,7 @@ label select,
 }
 
 .settings-modal {
-  width: min(560px, calc(100vw - 36px));
+  width: min(620px, calc(100vw - 36px));
   display: grid;
   gap: 14px;
   padding: 22px;
@@ -541,6 +605,83 @@ label select,
   background: #fffdf8;
   border: 1px solid #d8d0c2;
   box-shadow: 0 18px 60px rgba(20, 18, 14, 0.24);
+}
+
+.provider-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid #d8d0c2;
+  border-radius: 8px;
+  background: #f4f1ea;
+}
+
+.provider-tabs button {
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #5b554d;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.provider-tabs button.active {
+  color: #114d49;
+  background: #fffdf8;
+  border-color: #b6d8d2;
+  box-shadow: 0 6px 14px rgba(50, 45, 35, 0.07);
+}
+
+.secret-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px 36px;
+  gap: 8px;
+}
+
+.connection-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #d8d0c2;
+  border-radius: 8px;
+  background: #faf8f1;
+}
+
+.connection-card div {
+  display: grid;
+  gap: 4px;
+}
+
+.connection-card strong {
+  font-size: 13px;
+}
+
+.connection-card span,
+.connection-card small {
+  color: #6d675e;
+  font-size: 12px;
+}
+
+.connection-card.success {
+  border-color: #b6d8d2;
+  background: #ecf6f3;
+}
+
+.connection-card.error {
+  border-color: #efc5bb;
+  background: #fff4f0;
+}
+
+.connection-card.error span {
+  color: #8f2f24;
+}
+
+.reset-provider {
+  justify-self: start;
 }
 
 .data-path {
@@ -552,6 +693,53 @@ label select,
   border-radius: 6px;
   font-size: 12px;
   word-break: break-all;
+}
+
+.toast-host {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 20;
+  display: grid;
+  gap: 10px;
+  width: min(380px, calc(100vw - 40px));
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 10px 10px 10px 12px;
+  border: 1px solid #d8d0c2;
+  border-radius: 8px;
+  background: #fffdf8;
+  box-shadow: 0 14px 36px rgba(20, 18, 14, 0.16);
+  font-size: 13px;
+}
+
+.toast.success {
+  border-color: #b6d8d2;
+}
+
+.toast.error {
+  border-color: #efc5bb;
+}
+
+.toast.info {
+  border-color: #c4d8ef;
+}
+
+.toast-close {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  color: #5b554d;
+  background: transparent;
 }
 
 .spin {

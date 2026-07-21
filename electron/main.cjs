@@ -1,44 +1,15 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
-const fs = require('node:fs/promises');
 const path = require('node:path');
+const { createStorage } = require('./storage.cjs');
 
 const isDev = !app.isPackaged;
+let storage = null;
 
-function getDataFilePath() {
-  return path.join(app.getPath('userData'), 'learn-agent-data.json');
-}
-
-function defaultData() {
-  return {
-    notes: [],
-    conversations: [],
-    settings: {
-      provider: 'local',
-      endpoint: 'https://api.openai.com/v1/chat/completions',
-      model: 'gpt-4.1-mini',
-      apiKey: ''
-    }
-  };
-}
-
-async function loadData() {
-  const filePath = getDataFilePath();
-  try {
-    const raw = await fs.readFile(filePath, 'utf8');
-    return { ...defaultData(), ...JSON.parse(raw) };
-  } catch (error) {
-    if (error && error.code !== 'ENOENT') {
-      console.error('Failed to read app data:', error);
-    }
-    return defaultData();
+function getStorage() {
+  if (!storage) {
+    storage = createStorage(app.getPath('userData'));
   }
-}
-
-async function saveData(data) {
-  const filePath = getDataFilePath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
-  return { ok: true, filePath };
+  return storage;
 }
 
 function createWindow() {
@@ -212,9 +183,10 @@ function localChatAnswer(question, context, note) {
   ].join('\n');
 }
 
-ipcMain.handle('data:load', () => loadData());
-ipcMain.handle('data:save', (_event, data) => saveData(data));
-ipcMain.handle('data:path', () => getDataFilePath());
+ipcMain.handle('data:load', () => getStorage().loadData());
+ipcMain.handle('data:save', (_event, data) => getStorage().saveData(data));
+ipcMain.handle('data:path', () => getStorage().getDataFilePath());
+ipcMain.handle('data:search-notes', (_event, query) => getStorage().searchNotes(query));
 
 ipcMain.handle('ai:generate-note', async (_event, payload) => {
   const input = payload?.input || '';
@@ -229,12 +201,23 @@ ipcMain.handle('ai:generate-note', async (_event, payload) => {
   try {
     const raw = await callModel(settings, system, [{ role: 'user', content: input }]);
     const parsed = extractJson(raw);
-    return { ...localGeneratedNote(input), ...parsed };
+    return {
+      draft: { ...localGeneratedNote(input), ...parsed },
+      usedFallback: false,
+      message: '已使用配置模型生成笔记'
+    };
   } catch (error) {
+    const message = error?.message === 'LOCAL_PROVIDER'
+      ? '已使用本地兜底生成笔记'
+      : `模型调用失败，已使用本地兜底：${error?.message || '未知错误'}`;
     if (error?.message !== 'LOCAL_PROVIDER') {
       console.warn('Falling back to local note generation:', error);
     }
-    return localGeneratedNote(input);
+    return {
+      draft: localGeneratedNote(input),
+      usedFallback: true,
+      message
+    };
   }
 });
 
@@ -267,12 +250,52 @@ ipcMain.handle('ai:chat-with-note', async (_event, payload) => {
   ];
 
   try {
-    return await callModel(settings, system, messages);
+    return {
+      content: await callModel(settings, system, messages),
+      usedFallback: false,
+      message: '已使用配置模型回答'
+    };
   } catch (error) {
+    const message = error?.message === 'LOCAL_PROVIDER'
+      ? '已使用本地兜底回答'
+      : `模型调用失败，已使用本地兜底：${error?.message || '未知错误'}`;
     if (error?.message !== 'LOCAL_PROVIDER') {
       console.warn('Falling back to local chat:', error);
     }
-    return localChatAnswer(question, context, note);
+    return {
+      content: localChatAnswer(question, context, note),
+      usedFallback: true,
+      message
+    };
+  }
+});
+
+ipcMain.handle('ai:test-connection', async (_event, payload) => {
+  const settings = payload?.settings || {};
+  const testedAt = new Date().toISOString();
+  if ((settings.provider || 'local') === 'local') {
+    return { ok: true, message: 'Local fallback 不需要外部模型连接', testedAt };
+  }
+  if (settings.provider === 'openai-compatible' && !settings.apiKey) {
+    return { ok: false, message: '请输入 API Key 后再测试连接', testedAt };
+  }
+  try {
+    const content = await callModel(
+      settings,
+      '你是连接测试助手。请只回复 OK。',
+      [{ role: 'user', content: '请回复 OK，用于测试模型连接。' }]
+    );
+    return {
+      ok: true,
+      message: content ? `连接成功：${String(content).trim().slice(0, 80)}` : '连接成功',
+      testedAt
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `连接失败：${error?.message || '未知错误'}`,
+      testedAt
+    };
   }
 });
 

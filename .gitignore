@@ -15,3 +15,9 @@ Thumbs.db
 
 # Local-only learning notes
 PROJECT_TECHNICAL_NOTES.md
+
+# Local app data copies
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+learn-agent-data.backup-*.json

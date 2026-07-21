@@ -9,9 +9,12 @@ LearnAgent 是一个本地优先的桌面学习助手，用来把学习主题整
 - 根据学习主题生成结构化笔记
 - 编辑标题、摘要、标签、知识小节、案例、易错点和面试问题
 - 保存本地笔记库
+- 使用 SQLite 保存笔记、会话和设置
 - 围绕当前笔记进行上下文对话
-- 从历史笔记中召回相关内容辅助回答
+- 通过 SQLite 搜索索引从历史笔记中召回相关内容辅助回答
 - 支持本地兜底、Ollama、OpenAI-compatible 接口
+- 支持在 UI 中配置 Provider、Endpoint、Model、API Key，并测试连接
+- 支持模型失败提示和本地兜底提示
 - 支持 Windows 安装包打包和 GitHub Release 发布
 
 ## 下载
@@ -73,15 +76,41 @@ npm run dist:win
 
 使用远程接口时，需要在应用设置中填写 Endpoint、Model 和 API Key。
 
-## 本地数据
+设置面板支持：
 
-笔记、会话和模型设置默认保存在 Electron 用户数据目录中的：
+- Provider 预设切换
+- Endpoint 和 Model 输入
+- API Key 输入、显示/隐藏、清空
+- 连接测试
+- 最近一次连接测试状态和时间
+
+默认 Provider 配置：
 
 ```text
-learn-agent-data.json
+Local fallback       不需要 Endpoint / Model / API Key
+Ollama               http://127.0.0.1:11434/api/chat / llama3.1
+OpenAI-compatible    https://api.openai.com/v1/chat/completions / gpt-4.1-mini
 ```
 
-数据只保存在本机。请不要把本地数据文件、`.env` 或 API Key 上传到公开仓库。
+如果配置模型不可用，应用会在界面提示失败原因，并继续保留本地兜底生成和回答能力。
+
+## 本地数据
+
+笔记、会话和模型设置默认保存在 Electron 用户数据目录中的 SQLite 文件：
+
+```text
+learn-agent.sqlite
+```
+
+如果旧版本已经存在 `learn-agent-data.json`，应用首次启动 SQLite 版本时会自动导入旧数据，并在同一目录生成一份 JSON 备份：
+
+```text
+learn-agent-data.backup-时间戳.json
+```
+
+数据只保存在本机。请不要把本地 SQLite、JSON 备份、`.env` 或 API Key 上传到公开仓库。
+
+当前搜索使用 SQLite 搜索索引表覆盖标题、学科、主题、标签、摘要、小节、案例、易错点和面试问题。后续如果切换到 native SQLite，可进一步升级为 FTS5 全文搜索。
 
 ## 发布版本
 

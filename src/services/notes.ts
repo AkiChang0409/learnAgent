@@ -1,13 +1,16 @@
 import type { AppData, GeneratedNoteDraft, Note } from '../types';
 
 export const emptyData: AppData = {
+  schemaVersion: 1,
   notes: [],
   conversations: [],
   settings: {
     provider: 'local',
     endpoint: 'https://api.openai.com/v1/chat/completions',
     model: 'gpt-4.1-mini',
-    apiKey: ''
+    apiKey: '',
+    lastTestStatus: 'idle',
+    lastTestMessage: '尚未测试连接'
   }
 };
 
