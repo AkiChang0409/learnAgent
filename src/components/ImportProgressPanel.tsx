@@ -15,7 +15,7 @@ export function ImportProgressPanel({ progress }: { progress: MarkdownImportProg
       <div className="import-progress-body">
         <div className="import-progress-row">
           <strong>{progress.message}</strong>
-          <span>{percent}%</span>
+          <span>{isError ? '失败' : `${percent}%`}</span>
         </div>
         <div className="import-progress-bar" aria-hidden="true">
           <span style={{ width: `${percent}%` }} />

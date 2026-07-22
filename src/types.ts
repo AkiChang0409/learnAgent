@@ -128,6 +128,107 @@ export interface SubjectKnowledgeMap {
   topics: SubjectKnowledgeTopicDraft[];
 }
 
+export type EvidenceKind =
+  | 'feature'
+  | 'module'
+  | 'architecture'
+  | 'workflow'
+  | 'technical-decision'
+  | 'challenge'
+  | 'solution'
+  | 'tradeoff'
+  | 'data-model'
+  | 'security'
+  | 'performance'
+  | 'testing'
+  | 'deployment'
+  | 'risk'
+  | 'future-work';
+
+export interface EvidenceItem {
+  id: string;
+  kind: EvidenceKind;
+  title: string;
+  detail: string;
+  topicHint: string;
+  importance: 1 | 2 | 3 | 4 | 5;
+  evidenceText: string;
+  sourceRef: {
+    sourceId: string;
+    chunkId: string;
+    headingPath: string[];
+  };
+}
+
+export interface NoteTask {
+  id: string;
+  title: string;
+  objective: string;
+  mustCover: string[];
+  expectedSections: string[];
+  requiredEvidenceIds: string[];
+  avoid: string[];
+}
+
+export interface TopicPlan {
+  id: string;
+  title: string;
+  intent: string;
+  priority: 1 | 2 | 3 | 4 | 5;
+  requiredEvidenceIds: string[];
+  noteTasks: NoteTask[];
+}
+
+export interface SubjectPlan {
+  subject: string;
+  title: string;
+  overviewIntent: string;
+  globalTags: string[];
+  topics: TopicPlan[];
+  coverageNotes: string[];
+}
+
+export interface CoreNoteDraft extends GeneratedNoteDraft {
+  taskId: string;
+  usedEvidenceIds: string[];
+}
+
+export interface NoteEnrichment {
+  noteTaskId: string;
+  cases: string[];
+  pitfalls: string[];
+  interviewQuestions: string[];
+  suggestedTags: string[];
+  enrichmentRationale: string;
+  usedEvidenceIds: string[];
+}
+
+export interface ValidationReport {
+  ok: boolean;
+  score: number;
+  issues: Array<{
+    severity: 'blocker' | 'major' | 'minor';
+    targetId: string;
+    type:
+      | 'missing-evidence'
+      | 'unsupported-claim'
+      | 'missing-coverage'
+      | 'duplicate-content'
+      | 'too-generic'
+      | 'bad-structure'
+      | 'weak-interview-question';
+    message: string;
+    suggestedFix: string;
+    relatedEvidenceIds: string[];
+  }>;
+  rewriteTasks: Array<{
+    agentId: 'project.analysis-master';
+    targetId: string;
+    instruction: string;
+    requiredEvidenceIds: string[];
+  }>;
+}
+
 export interface MarkdownImportResult {
   canceled?: boolean;
   filePath?: string;
@@ -145,6 +246,8 @@ export type MarkdownImportStage =
   | 'reading-file'
   | 'chunking'
   | 'extracting'
+  | 'analyzing'
+  | 'validating'
   | 'organizing'
   | 'normalizing'
   | 'saving'
@@ -153,6 +256,7 @@ export type MarkdownImportStage =
   | 'error';
 
 export interface MarkdownImportProgress {
+  runId?: string;
   stage: MarkdownImportStage;
   message: string;
   fileName?: string;

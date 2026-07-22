@@ -6,6 +6,7 @@ const { createStorage } = require('./storage.cjs');
 
 const isDev = !app.isPackaged;
 let storage = null;
+const agentJobRuns = new Map();
 
 const OPENAI_PRICES_PER_MILLION = [
   ['gpt-4.1-mini', { input: 0.4, cachedInput: 0.1, output: 1.6 }],
@@ -238,34 +239,61 @@ const AGENT_REGISTRY = {
       'sections 是数组，每项包含 heading 和 content。tags/cases/pitfalls/interviewQuestions 都是字符串数组。'
     ].join('\n')
   },
-  'markdown.knowledge-extractor': {
-    name: '知识抽取 Agent',
+  'document.ingestor': {
+    name: '文档证据抽取 Agent',
     system: [
-      '你是知识抽取 Agent，只负责从输入材料中抽取原子知识点，不负责最终编排。',
-      '输入可能来自完整 Markdown 或长文档分块，可能是学科资料，也可能是项目开发文档。',
-      '抽取时保留事实、模块、概念、功能、技术点、难点、解决方案、工程取舍、案例、易错点、复习问题。',
-      '不要写成完整文章，不要泛泛总结，不要遗漏文档里明确出现的重要点。',
+      '你是 LearnAgent 的 document.ingestor，负责从开发日志、Markdown 文档或项目说明中抽取可追踪的项目事实。',
+      '你的任务只包括“抽取事实卡片”，不要写成总结文章，不要做最终主题规划，不要补充原文没有的信息。',
+      '抽取时优先保留：项目功能和用户流程、模块边界和架构设计、关键技术决策、工程取舍、难点、解决方案、数据模型、检索、Agent 编排、模型调用、失败兜底、安全、性能、部署等实现细节。',
+      '每条 evidence 都必须来自输入文本。不要编造不存在的技术栈、指标、难点或结论。',
+      '如果原文只描述功能，要提取功能事实，不要强行上升成架构亮点。',
+      'evidenceText 必须是输入中的短摘录或忠实改写，用于后续追溯。',
       '只输出 JSON 对象，不要输出 Markdown。',
-      'JSON 字段：documentType, subjectHints, items。',
-      'documentType 只能是 project、subject、mixed。subjectHints 是字符串数组。',
-      'items 是数组，每项包含 kind, title, detail, topicHint, evidence, importance。',
-      'kind 可用 concept、feature、module、technical-point、challenge、solution、tradeoff、case、pitfall、question、workflow。importance 为 1-5。'
+      '输出 JSON 字段：sourceId, chunkId, chunkSummary, evidenceItems。',
+      'evidenceItems 是数组，每项包含 id, kind, title, detail, topicHint, importance, evidenceText, sourceRef。',
+      'kind 可用 feature、module、architecture、workflow、technical-decision、challenge、solution、tradeoff、data-model、security、performance、testing、deployment、risk、future-work。importance 为 1-5。'
     ].join('\n')
   },
-  'knowledge.organizer': {
-    name: '知识整理 Agent',
+  'project.analysis-master': {
+    name: '项目技术分析大师 Agent',
     system: [
-      '你是知识整理 Agent，只负责把已抽取的知识点整理成可落库的学科知识地图。',
-      '你不需要重新抽取原文，也不要把所有内容塞进一篇笔记。',
-      '必须输出多主题、多笔记结构：一个 subject 下应有多个 topics，每个 topic 下应有若干 notes。',
-      '如果材料是项目文档，主题应覆盖：功能全景、技术架构、核心亮点、技术难点与解决方案、工程实践与可复用经验。可按文档内容调整命名。',
-      '如果材料是学科资料，主题应按概念体系、核心机制、案例应用、易错边界、复习面试来组织。可按文档内容调整命名。',
-      '每篇 note 聚焦一个相对独立的知识点或项目能力，不要过长；重点完整但不啰嗦。',
-      '只输出 JSON 对象，不要输出 Markdown。',
-      'JSON 字段：subject, title, overview, tags, topics。',
+      '你是一个资深项目技术分析专家、技术面试官和项目复盘教练。',
+      '你的任务不是整理 Markdown，也不是复制原文目录，而是阅读项目文档后理解项目本身。',
+      '你必须推理：',
+      '1. 这个项目要解决什么真实问题。',
+      '2. 用户需求如何映射到功能设计。',
+      '3. 功能设计如何落到技术架构、数据流和模块实现。',
+      '4. 项目中哪些实现体现技术价值、工程取舍、复杂度控制或可扩展性。',
+      '5. 面试官真正会追问什么，以及候选人应该如何讲清楚。',
+      '你可以基于 evidence 做归纳和判断，但不能编造原文没有支撑的事实。',
+      '输出必须是完整 SubjectKnowledgeMap JSON，不要输出 Markdown。',
+      'SubjectKnowledgeMap 字段：subject, title, overview, tags, topics。',
       'topics 是数组，每项包含 title, summary, notes。',
       'notes 是数组，每项包含 title, tags, summary, sections, cases, pitfalls, interviewQuestions, subNotes。',
-      'subNotes 可为空；只有当某篇 note 下面确实需要进一步拆分时才使用。sections 是数组，每项包含 heading 和 content。'
+      '所有数组字段必须是字符串数组或对象数组中可明确转成文本的字段；推荐 cases/pitfalls/interviewQuestions 直接输出字符串数组。',
+      '每篇 note 的 sections 至少 4 个，且每个 section.content 至少 120 字。',
+      'sections 必须包含或等价覆盖：需求/问题背景、技术实现机制、工程取舍与设计原因、项目亮点与面试表达、可继续优化方向。',
+      '第一篇 note 必须是“项目整体技术分析”，讲清项目解决什么问题、为什么这么做、核心技术路线。',
+      '后续笔记必须按分析逻辑生成，而不是按原文目录复制。',
+      '每篇笔记必须包含：需求或问题背景、对应技术实现、关键设计取舍、项目亮点或面试价值、可继续优化方向。',
+      'cases、pitfalls、interviewQuestions 必须由你基于整体理解生成，不要留空。',
+      '不要出现“原文摘要”“关键内容”“技术线索”这类摘录式模板标题。'
+    ].join('\n')
+  },
+  'project.analysis-critic': {
+    name: '项目技术分析质量评审 Agent',
+    system: [
+      '你是 LearnAgent 的 project.analysis-critic，负责严格检查项目技术分析笔记是否真正读懂了项目。',
+      '你不重写内容，只输出质量报告。',
+      '重点检查：是否只是复述目录；是否缺少需求与技术实现关系；是否缺少技术价值、工程取舍和面试官视角；是否泛泛而谈；是否存在 evidence 不支持的断言；是否出现“原文摘要”“关键内容”“技术线索”等摘录式模板。',
+      '如果第一篇不是项目整体技术分析，判为不合格。',
+      '如果大多数笔记没有同时覆盖“需求/问题、技术实现、价值/取舍、优化方向”，判为不合格。',
+      '如果任一笔记 sections 少于 4 个，或正文主要堆在 summary 而不是分块讲解，判为不合格。',
+      '如果 cases/pitfalls 出现对象结构或渲染后可能成为 [object Object]，判为不合格。',
+      '只输出 JSON 对象，不要输出 Markdown。',
+      '输出 JSON 字段：ok, score, issues, rewriteInstruction。',
+      'score 为 0-100。issues 是数组，每项包含 severity, targetId, type, message, suggestedFix, relatedEvidenceIds。',
+      'rewriteInstruction 是给 project.analysis-master 的整体重写指令；如果 ok 为 true 可以为空。'
     ].join('\n')
   }
 };
@@ -297,15 +325,148 @@ function sendMarkdownImportProgress(event, progress) {
   });
 }
 
-function extractJson(text) {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const source = fenced ? fenced[1] : text;
-  const start = source.indexOf('{');
-  const end = source.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error('No JSON object found in model response.');
+function createAgentJob(projectBrief, sourceManifest) {
+  const id = `agent_run_${randomUUID()}`;
+  const createdAt = new Date().toISOString();
+  const job = {
+    id,
+    createdAt,
+    updatedAt: createdAt,
+    status: 'running',
+    projectBrief,
+    sourceManifest,
+    steps: []
+  };
+  agentJobRuns.set(id, job);
+  if (agentJobRuns.size > 20) {
+    const oldest = Array.from(agentJobRuns.keys())[0];
+    agentJobRuns.delete(oldest);
   }
-  return JSON.parse(source.slice(start, end + 1));
+  return job;
+}
+
+function updateAgentJobStatus(runId, status) {
+  const job = agentJobRuns.get(runId);
+  if (!job) return;
+  job.status = status;
+  job.updatedAt = new Date().toISOString();
+}
+
+function clipJson(value, max = 1200) {
+  return clipText(JSON.stringify(value, null, 2), max);
+}
+
+function createAgentJobStep(runId, agentId, inputSummary) {
+  const job = agentJobRuns.get(runId);
+  if (!job) return null;
+  const now = new Date().toISOString();
+  const step = {
+    id: `agent_step_${randomUUID()}`,
+    runId,
+    agentId,
+    status: 'running',
+    inputSummary: clipText(inputSummary, 1200),
+    outputSummary: '',
+    usageRecordId: '',
+    errorMessage: '',
+    createdAt: now,
+    updatedAt: now
+  };
+  job.steps.push(step);
+  job.updatedAt = now;
+  return step;
+}
+
+function finishAgentJobStep(step, patch) {
+  if (!step) return;
+  Object.assign(step, patch, {
+    updatedAt: new Date().toISOString()
+  });
+  const job = agentJobRuns.get(step.runId);
+  if (job) job.updatedAt = step.updatedAt;
+}
+
+async function runAgentStep(settings, runId, agentId, userContent, operation, options = {}) {
+  const step = createAgentJobStep(runId, agentId, userContent);
+  try {
+    const result = await runAgent(settings, agentId, userContent, operation, options);
+    finishAgentJobStep(step, {
+      status: 'completed',
+      outputSummary: clipText(result.content || clipJson(result.json || {}), 1200),
+      usageRecordId: result.usageRecord?.id || ''
+    });
+    return result;
+  } catch (error) {
+    finishAgentJobStep(step, {
+      status: 'failed',
+      errorMessage: error?.message || '未知错误'
+    });
+    updateAgentJobStatus(runId, 'failed');
+    throw error;
+  }
+}
+
+function extractJson(text) {
+  const source = String(text || '');
+  const candidates = Array.from(source.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi))
+    .map((match) => match[1])
+    .concat(source);
+
+  const errors = [];
+  for (const candidate of candidates) {
+    const parsed = parseFirstJsonObject(candidate);
+    if (parsed.ok) return parsed.value;
+    if (parsed.error) errors.push(parsed.error);
+  }
+
+  throw new Error(errors[0] || 'No JSON object found in model response.');
+}
+
+function parseFirstJsonObject(source) {
+  const text = String(source || '');
+  const start = text.indexOf('{');
+  if (start === -1) {
+    return { ok: false, error: 'No JSON object found in model response.' };
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        const jsonText = text.slice(start, index + 1);
+        try {
+          return { ok: true, value: JSON.parse(jsonText) };
+        } catch (error) {
+          return { ok: false, error: error?.message || 'Invalid JSON object in model response.' };
+        }
+      }
+    }
+  }
+
+  return { ok: false, error: 'Unclosed JSON object in model response.' };
 }
 
 function localGeneratedNote(input) {
@@ -404,68 +565,672 @@ function chunkMarkdown(markdown, maxChars = 9000) {
   });
 }
 
-async function buildMarkdownImportContent(settings, fileName, headings, chunks, onProgress = () => {}) {
-  const headingText = headings.map((heading) => `${'#'.repeat(heading.level)} ${heading.title}`).join('\n') || '无明显标题';
-  const batches = chunks.length <= 4
-    ? [{
-        label: 'full-document',
-        content: chunks.map((chunk, index) => `--- Markdown Chunk ${index + 1}/${chunks.length} ---\n${chunk}`).join('\n\n')
-      }]
-    : chunks.map((chunk, index) => ({
-        label: `chunk-${index + 1}-of-${chunks.length}`,
-        content: chunk
-      }));
-  const extractedKnowledge = [];
-  const usageRecords = [];
+function createProjectBrief(fileName, markdown) {
+  const cleanName = path.basename(fileName, path.extname(fileName)) || 'Markdown 文档';
+  return {
+    projectName: cleanName,
+    projectType: inferMarkdownSubject(fileName, markdown) === '项目技术方案'
+      ? '项目技术方案 / 开发日志'
+      : '学习资料 / 知识文档',
+    targetAudience: 'interview',
+    qualityGoal: '提炼项目亮点、工程取舍、实现难点、可复用经验，避免普通功能说明。'
+  };
+}
 
-  for (const [index, batch] of batches.entries()) {
-    onProgress({
+function globalImportConstraints() {
+  return [
+    '输出使用中文。',
+    '不要编造原始材料中不存在的技术细节、指标或结果。',
+    '优先提炼项目亮点、技术价值、难点、解决方案和工程取舍。',
+    '避免普通功能说明，内容应适合技术复盘和面试表达。',
+    '所有 Agent 输出必须是 JSON 对象，不要输出 Markdown 包裹。'
+  ];
+}
+
+function sourceManifestFor(fileName, chunks) {
+  return [{
+    sourceId: 'source_1',
+    fileName,
+    fileType: /\.(md|markdown|mdown|mkd)$/i.test(fileName) ? 'markdown' : 'text',
+    chunkCount: chunks.length
+  }];
+}
+
+function headingPathForChunk(chunk) {
+  const heading = String(chunk || '').match(/^(#{1,4})\s+(.+)$/m);
+  if (!heading) return [];
+  return [heading[2].replace(/[#*_`]/g, '').trim()].filter(Boolean);
+}
+
+function compactEvidenceItem(item) {
+  return {
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    detail: clipText(item.detail, 900),
+    topicHint: item.topicHint,
+    importance: item.importance,
+    evidenceText: clipText(item.evidenceText, 420),
+    sourceRef: item.sourceRef
+  };
+}
+
+function buildAgentUserPrompt({
+  projectBrief,
+  sourceManifest,
+  globalConstraints,
+  task,
+  evidence,
+  instruction
+}) {
+  return [
+    `项目背景：\n${JSON.stringify(projectBrief, null, 2)}`,
+    `输入来源：\n${JSON.stringify(sourceManifest, null, 2)}`,
+    `全局约束：\n${JSON.stringify(globalConstraints, null, 2)}`,
+    `当前任务：\n${JSON.stringify(task, null, 2)}`,
+    evidence === undefined ? '' : `当前 evidence：\n${JSON.stringify(evidence, null, 2)}`,
+    instruction ? `执行要求：\n${instruction}` : ''
+  ].filter(Boolean).join('\n\n');
+}
+
+function normalizeEvidenceKind(value) {
+  const clean = String(value || '').trim();
+  const allowed = new Set([
+    'feature',
+    'module',
+    'architecture',
+    'workflow',
+    'technical-decision',
+    'challenge',
+    'solution',
+    'tradeoff',
+    'data-model',
+    'security',
+    'performance',
+    'testing',
+    'deployment',
+    'risk',
+    'future-work'
+  ]);
+  if (allowed.has(clean)) return clean;
+  if (/challenge|难点|问题|风险/.test(clean)) return 'challenge';
+  if (/solution|方案|解决/.test(clean)) return 'solution';
+  if (/trade|取舍|决策/.test(clean)) return 'tradeoff';
+  if (/data|schema|模型|数据库/.test(clean)) return 'data-model';
+  if (/workflow|流程/.test(clean)) return 'workflow';
+  if (/module|模块/.test(clean)) return 'module';
+  if (/arch|架构/.test(clean)) return 'architecture';
+  return 'feature';
+}
+
+function normalizeImportance(value) {
+  const score = Number(value || 3);
+  if (!Number.isFinite(score)) return 3;
+  return Math.max(1, Math.min(5, Math.round(score)));
+}
+
+function normalize(text) {
+  return String(text || '').toLowerCase().replace(/[^\p{L}\p{N}\u4e00-\u9fff]+/gu, ' ');
+}
+
+function normalizeEvidenceBatch(value, task, chunkText) {
+  const source = value && typeof value === 'object' ? value : {};
+  const rawItems = Array.isArray(source.evidenceItems)
+    ? source.evidenceItems
+    : Array.isArray(source.items)
+      ? source.items
+      : [];
+  const fallbackTitle = task.headingPath?.[0] || `文档块 ${task.chunkIndex}`;
+  const fallbackDetail = clipText(chunkText, 700);
+  const items = (rawItems.length ? rawItems : [{
+    kind: 'feature',
+    title: fallbackTitle,
+    detail: fallbackDetail,
+    topicHint: fallbackTitle,
+    evidenceText: fallbackDetail,
+    importance: 2
+  }]).slice(0, 18).map((item, index) => {
+    const title = String(item?.title || item?.topicHint || fallbackTitle || `证据 ${index + 1}`).trim();
+    const detail = String(item?.detail || item?.evidence || item?.evidenceText || '').trim() || fallbackDetail;
+    return {
+      id: String(item?.id || `ev_${task.chunkIndex}_${index + 1}`).replace(/[^\w.-]+/g, '_'),
+      kind: normalizeEvidenceKind(item?.kind),
+      title,
+      detail,
+      topicHint: String(item?.topicHint || title).trim(),
+      importance: normalizeImportance(item?.importance),
+      evidenceText: String(item?.evidenceText || item?.evidence || detail).trim(),
+      sourceRef: {
+        sourceId: task.sourceId,
+        chunkId: task.chunkId,
+        headingPath: task.headingPath || []
+      }
+    };
+  }).filter((item) => item.title && item.detail);
+
+  return {
+    sourceId: task.sourceId,
+    chunkId: task.chunkId,
+    chunkSummary: String(source.chunkSummary || fallbackDetail).trim(),
+    evidenceItems: items
+  };
+}
+
+function dedupeEvidenceItems(batches) {
+  const byKey = new Map();
+  batches.flatMap((batch) => batch.evidenceItems || []).forEach((item) => {
+    const key = `${item.kind}\u0000${normalize(item.title).slice(0, 80)}\u0000${normalize(item.detail).slice(0, 140)}`;
+    const existing = byKey.get(key);
+    if (!existing || item.importance > existing.importance || item.detail.length > existing.detail.length) {
+      byKey.set(key, item);
+    }
+  });
+  return Array.from(byKey.values())
+    .sort((a, b) => b.importance - a.importance || a.id.localeCompare(b.id))
+    .slice(0, 180);
+}
+
+function localSubjectPlan(fileName, markdown, evidenceItems) {
+  const fallback = localMarkdownKnowledgeMap(fileName, markdown);
+  const evidenceByTopic = new Map();
+  evidenceItems.forEach((item) => {
+    const topic = item.topicHint || item.kind || '核心内容';
+    evidenceByTopic.set(topic, [...(evidenceByTopic.get(topic) || []), item]);
+  });
+  const evidenceTopics = Array.from(evidenceByTopic.entries()).slice(0, 8);
+  const topics = (evidenceTopics.length ? evidenceTopics : fallback.topics.map((topic) => [topic.title, []]))
+    .map(([topicTitle, items], index) => {
+      const ids = items.map((item) => item.id).slice(0, 12);
+      return {
+        id: `topic_${index + 1}`,
+        title: String(topicTitle || `主题 ${index + 1}`).trim(),
+        intent: `围绕“${topicTitle}”整理技术价值、实现机制和可复用经验。`,
+        priority: index < 3 ? 4 : 3,
+        requiredEvidenceIds: ids,
+        noteTasks: [{
+          id: `note_task_${index + 1}_1`,
+          title: String(topicTitle || `主题 ${index + 1}`).trim(),
+          objective: `生成一篇关于“${topicTitle}”的项目技术笔记。`,
+          mustCover: ['问题背景', '实现机制', '技术价值', '工程取舍'],
+          expectedSections: ['问题背景', '实现机制', '技术价值与取舍'],
+          requiredEvidenceIds: ids,
+          avoid: ['不要写成普通功能清单', '不要编造材料中不存在的实现细节']
+        }]
+      };
+    });
+  return {
+    subject: fallback.subject,
+    title: fallback.title,
+    overviewIntent: fallback.overview,
+    globalTags: fallback.tags,
+    topics,
+    coverageNotes: evidenceItems.length ? [] : ['本地规划只基于标题和段落线索，证据不足。']
+  };
+}
+
+function evidenceIdsSet(evidenceItems) {
+  return new Set((evidenceItems || []).map((item) => item.id));
+}
+
+function normalizeIdList(values, allowedIds) {
+  const ids = asStringList(values).filter((id) => !allowedIds || allowedIds.has(id));
+  return Array.from(new Set(ids));
+}
+
+function normalizeSubjectPlan(value, fileName, markdown, evidenceItems) {
+  const fallback = localSubjectPlan(fileName, markdown, evidenceItems);
+  const source = value && typeof value === 'object' ? value : {};
+  const allowedIds = evidenceIdsSet(evidenceItems);
+  const subject = String(source.subject || fallback.subject || inferMarkdownSubject(fileName, markdown)).trim();
+  const rawTopics = Array.isArray(source.topics) ? source.topics : fallback.topics;
+  const topics = rawTopics.slice(0, 10).map((topic, topicIndex) => {
+    const fallbackTopic = fallback.topics[topicIndex] || fallback.topics[0] || {};
+    const title = String(topic?.title || fallbackTopic.title || `主题 ${topicIndex + 1}`).trim();
+    const topicIds = normalizeIdList(topic?.requiredEvidenceIds, allowedIds);
+    const rawTasks = Array.isArray(topic?.noteTasks) ? topic.noteTasks : fallbackTopic.noteTasks || [];
+    const noteTasks = (rawTasks.length ? rawTasks : [{
+      title,
+      objective: `生成一篇关于“${title}”的项目技术笔记。`,
+      mustCover: ['问题背景', '实现机制', '技术价值'],
+      expectedSections: ['问题背景', '实现机制', '技术价值'],
+      requiredEvidenceIds: topicIds
+    }]).slice(0, 4).map((task, taskIndex) => {
+      const taskIds = normalizeIdList(task?.requiredEvidenceIds, allowedIds);
+      return {
+        id: String(task?.id || `note_task_${topicIndex + 1}_${taskIndex + 1}`).replace(/[^\w.-]+/g, '_'),
+        title: String(task?.title || title || `笔记 ${taskIndex + 1}`).trim(),
+        objective: String(task?.objective || `生成一篇关于“${title}”的项目技术笔记。`).trim(),
+        mustCover: asStringList(task?.mustCover).length ? asStringList(task.mustCover) : ['问题背景', '实现机制', '技术价值'],
+        expectedSections: asStringList(task?.expectedSections).length ? asStringList(task.expectedSections) : ['问题背景', '实现机制', '技术价值'],
+        requiredEvidenceIds: taskIds.length ? taskIds : topicIds,
+        avoid: asStringList(task?.avoid).length ? asStringList(task.avoid) : ['不要写成普通功能清单', '不要编造材料中不存在的实现细节']
+      };
+    });
+    return {
+      id: String(topic?.id || `topic_${topicIndex + 1}`).replace(/[^\w.-]+/g, '_'),
+      title,
+      intent: String(topic?.intent || fallbackTopic.intent || `围绕“${title}”整理核心内容。`).trim(),
+      priority: normalizeImportance(topic?.priority || fallbackTopic.priority || 3),
+      requiredEvidenceIds: topicIds.length ? topicIds : noteTasks.flatMap((task) => task.requiredEvidenceIds).slice(0, 12),
+      noteTasks
+    };
+  }).filter((topic) => topic.title && topic.noteTasks.length);
+
+  return {
+    subject,
+    title: String(source.title || fallback.title || `${subject} 知识地图`).trim(),
+    overviewIntent: String(source.overviewIntent || source.overview || fallback.overviewIntent || '').trim(),
+    globalTags: asStringList(source.globalTags || source.tags).length
+      ? asStringList(source.globalTags || source.tags)
+      : fallback.globalTags,
+    topics: topics.length ? topics : fallback.topics,
+    coverageNotes: asStringList(source.coverageNotes)
+  };
+}
+
+function buildEvidencePack(noteTask, topicPlan, evidenceItems) {
+  const byId = new Map(evidenceItems.map((item) => [item.id, item]));
+  const selectedIds = new Set([
+    ...normalizeIdList(noteTask.requiredEvidenceIds, byId),
+    ...normalizeIdList(topicPlan.requiredEvidenceIds, byId)
+  ]);
+  const selected = Array.from(selectedIds).map((id) => byId.get(id)).filter(Boolean);
+  const global = evidenceItems
+    .filter((item) => ['architecture', 'technical-decision', 'challenge', 'solution', 'tradeoff'].includes(item.kind))
+    .filter((item) => !selectedIds.has(item.id))
+    .slice(0, 6);
+  const fallback = selected.length ? [] : evidenceItems.slice(0, 8);
+  return [...selected, ...global, ...fallback].slice(0, 22);
+}
+
+function normalizeCoreNoteDraft(value, noteTask, topicPlan, subject, evidencePack) {
+  const source = value && typeof value === 'object' ? value : {};
+  const fallback = localGeneratedNote(noteTask.title || topicPlan.title);
+  const allowedIds = evidenceIdsSet(evidencePack);
+  const sections = Array.isArray(source.sections)
+    ? source.sections.map((section) => ({
+        heading: String(section?.heading || '小节').trim(),
+        content: String(section?.content || '').trim()
+      })).filter((section) => section.heading && section.content)
+    : [];
+  const mustCoverText = (noteTask.mustCover || []).map((item) => `- ${item}`).join('\n');
+  return {
+    taskId: String(source.taskId || noteTask.id),
+    title: String(source.title || noteTask.title || fallback.title).trim(),
+    subject: String(source.subject || subject || fallback.subject).trim(),
+    topic: String(source.topic || topicPlan.title || fallback.topic).trim(),
+    tags: asStringList(source.tags).length ? asStringList(source.tags) : Array.from(new Set([subject, topicPlan.title, ...asStringList(fallback.tags)])),
+    summary: String(source.summary || fallback.summary || noteTask.objective || '').trim(),
+    sections: sections.length ? sections : [
+      {
+        heading: '任务目标',
+        content: noteTask.objective || fallback.summary
+      },
+      {
+        heading: '必须覆盖',
+        content: mustCoverText || '当前材料未提供细节。'
+      }
+    ],
+    cases: asStringList(source.cases),
+    pitfalls: asStringList(source.pitfalls),
+    interviewQuestions: asStringList(source.interviewQuestions),
+    usedEvidenceIds: normalizeIdList(source.usedEvidenceIds, allowedIds)
+  };
+}
+
+function normalizeNoteEnrichment(value, noteTask, coreNote, evidencePack) {
+  const source = value && typeof value === 'object' ? value : {};
+  const allowedIds = evidenceIdsSet(evidencePack);
+  return {
+    noteTaskId: String(source.noteTaskId || noteTask.id),
+    cases: asStringList(source.cases).slice(0, 5),
+    pitfalls: asStringList(source.pitfalls).slice(0, 6),
+    interviewQuestions: asStringList(source.interviewQuestions).slice(0, 10),
+    suggestedTags: asStringList(source.suggestedTags).slice(0, 8),
+    enrichmentRationale: String(source.enrichmentRationale || `围绕《${coreNote.title}》补充复盘材料。`).trim(),
+    usedEvidenceIds: normalizeIdList(source.usedEvidenceIds, allowedIds)
+  };
+}
+
+function localEnrichment(noteTask, coreNote, evidencePack) {
+  const evidenceTitles = evidencePack.map((item) => item.title).filter(Boolean).slice(0, 3);
+  return {
+    noteTaskId: noteTask.id,
+    cases: evidenceTitles.map((title) => `案例：结合“${title}”说明该能力在项目中的触发场景、处理流程和结果。`).slice(0, 3),
+    pitfalls: [
+      '只描述功能表象，没有说明背后的任务边界、数据流和失败处理。',
+      '把模型生成能力说成单次 prompt 调用，忽略证据抽取、规划、写作和校验链路。',
+      '没有区分当前已实现能力和后续可优化方向。'
+    ],
+    interviewQuestions: [
+      `为什么要把“${coreNote.title}”拆成独立能力，而不是放在一个大 prompt 里？`,
+      `这个能力依赖哪些输入证据？如果证据不足，你如何避免模型编造？`,
+      `当前实现有哪些边界，下一步会如何增强？`,
+      `如果让你重构这部分，你会优先优化数据结构、prompt 还是编排流程？`
+    ],
+    suggestedTags: Array.from(new Set([...(coreNote.tags || []), '项目复盘', '面试表达'])).slice(0, 8),
+    enrichmentRationale: '本地规则根据核心笔记和 evidence 标题生成补充材料。',
+    usedEvidenceIds: evidencePack.map((item) => item.id).slice(0, 6)
+  };
+}
+
+function normalizeValidationReport(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const issues = Array.isArray(source.issues) ? source.issues.slice(0, 20).map((issue) => ({
+    severity: ['blocker', 'major', 'minor'].includes(issue?.severity) ? issue.severity : 'minor',
+    targetId: String(issue?.targetId || '').trim(),
+    type: String(issue?.type || 'bad-structure').trim(),
+    message: String(issue?.message || '').trim(),
+    suggestedFix: String(issue?.suggestedFix || '').trim(),
+    relatedEvidenceIds: asStringList(issue?.relatedEvidenceIds)
+  })).filter((issue) => issue.targetId && issue.message) : [];
+  const rewriteTasks = Array.isArray(source.rewriteTasks) ? source.rewriteTasks.slice(0, 6).map((task) => ({
+    agentId: 'project.analysis-master',
+    targetId: String(task?.targetId || '').trim(),
+    instruction: String(task?.instruction || '').trim(),
+    requiredEvidenceIds: asStringList(task?.requiredEvidenceIds)
+  })).filter((task) => task.targetId && task.instruction) : [];
+  const score = Math.max(0, Math.min(100, Number(source.score ?? (issues.length ? 72 : 90)) || 0));
+  return {
+    ok: Boolean(source.ok ?? (score >= 75 && !issues.some((issue) => issue.severity === 'blocker'))),
+    score,
+    issues,
+    rewriteTasks
+  };
+}
+
+function localValidationReport(subjectPlan, notes) {
+  const issues = [];
+  notes.forEach(({ core, enrichment }) => {
+    if (!core.sections?.length) {
+      issues.push({
+        severity: 'major',
+        targetId: core.taskId,
+        type: 'bad-structure',
+        message: '核心笔记缺少正文小节。',
+        suggestedFix: '重新生成正文小节。',
+        relatedEvidenceIds: core.usedEvidenceIds || []
+      });
+    }
+    if (!enrichment.interviewQuestions?.length) {
+      issues.push({
+        severity: 'minor',
+        targetId: core.taskId,
+        type: 'weak-interview-question',
+        message: '缺少面试问题。',
+        suggestedFix: '补充能考察技术深度的面试追问。',
+        relatedEvidenceIds: enrichment.usedEvidenceIds || []
+      });
+    }
+  });
+  return {
+    ok: !issues.some((issue) => issue.severity === 'major'),
+    score: issues.length ? 78 : 92,
+    issues,
+    rewriteTasks: []
+  };
+}
+
+function buildProjectAnalysisContext(fileName, markdown, headings, chunks, evidenceBatches, evidenceItems, critique = null) {
+  const headingStructure = headings
+    .map((heading) => `${'  '.repeat(Math.max(heading.level - 1, 0))}- ${heading.title}`)
+    .join('\n') || '无明显标题结构';
+  const chunkSummaries = evidenceBatches.map((batch, index) => ({
+    chunkId: batch.chunkId,
+    index: index + 1,
+    summary: clipText(batch.chunkSummary, 600),
+    evidenceCount: batch.evidenceItems?.length || 0
+  }));
+  const keyExcerpts = chunks.map((chunk, index) => ({
+    chunkId: `chunk_${index + 1}`,
+    headingPath: headingPathForChunk(chunk),
+    excerpt: clipText(cleanMarkdownBlock(chunk), 1200)
+  })).filter((item) => item.excerpt).slice(0, 12);
+
+  return {
+    fileName,
+    documentType: inferMarkdownSubject(fileName, markdown),
+    headingStructure,
+    chunkCount: chunks.length,
+    chunkSummaries,
+    evidenceCards: evidenceItems.map(compactEvidenceItem),
+    keyExcerpts,
+    qualityGoal: [
+      '产出的是项目技术分析笔记，不是 Markdown 目录整理。',
+      '必须推理需求和技术实现之间的关系。',
+      '必须讲清技术架构、数据流、模块实现、难点、解决方案、工程取舍和项目亮点。',
+      '必须包含面试官视角的追问、易错点和案例。',
+      '不要输出“原文摘要”“关键内容”“技术线索”等摘录式模板。'
+    ],
+    critique
+  };
+}
+
+function normalizeAnalysisCriticReport(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const issues = Array.isArray(source.issues) ? source.issues.slice(0, 20).map((issue) => ({
+    severity: ['blocker', 'major', 'minor'].includes(issue?.severity) ? issue.severity : 'major',
+    targetId: String(issue?.targetId || 'analysis').trim(),
+    type: String(issue?.type || 'too-generic').trim(),
+    message: String(issue?.message || '').trim(),
+    suggestedFix: String(issue?.suggestedFix || '').trim(),
+    relatedEvidenceIds: asStringList(issue?.relatedEvidenceIds)
+  })).filter((issue) => issue.message) : [];
+  const score = Math.max(0, Math.min(100, Number(source.score ?? (issues.length ? 68 : 88)) || 0));
+  return {
+    ok: Boolean(source.ok ?? (score >= 78 && !issues.some((issue) => issue.severity === 'blocker'))),
+    score,
+    issues,
+    rewriteInstruction: String(source.rewriteInstruction || '').trim()
+  };
+}
+
+function localAnalysisCriticReport(knowledgeMap) {
+  const notes = (knowledgeMap?.topics || []).flatMap((topic) => topic.notes || []);
+  const issueMessages = [];
+  const serialized = JSON.stringify(knowledgeMap || {});
+  if (/原文摘要|关键内容|技术线索/.test(serialized)) {
+    issueMessages.push('输出包含摘录式模板标题。');
+  }
+  if (notes.length < 5) {
+    issueMessages.push('分析笔记数量不足，未形成完整项目技术分析。');
+  }
+  if (notes.some((note) => !Array.isArray(note.sections) || note.sections.length < 4)) {
+    issueMessages.push('存在笔记缺少分块讲解，正文不能只放在知识总结里。');
+  }
+  const weakNotes = notes.filter((note) => {
+    const text = [note.summary, ...(note.sections || []).map((section) => `${section.heading}\n${section.content}`)].join('\n');
+    return !/需求|问题|背景/.test(text) || !/实现|架构|数据|模块|流程/.test(text) || !/取舍|价值|亮点|优化|扩展/.test(text);
+  });
+  if (weakNotes.length > Math.max(1, notes.length / 2)) {
+    issueMessages.push('多数笔记没有同时覆盖需求/问题、技术实现、价值/取舍和优化方向。');
+  }
+  const issues = issueMessages.map((message, index) => ({
+    severity: index === 0 ? 'blocker' : 'major',
+    targetId: 'analysis',
+    type: 'too-generic',
+    message,
+    suggestedFix: '请整体重写，必须从项目目标、需求映射、技术实现、工程取舍和面试表达角度分析。',
+    relatedEvidenceIds: []
+  }));
+  return {
+    ok: issues.length === 0,
+    score: issues.length ? 62 : 86,
+    issues,
+    rewriteInstruction: issues.length
+      ? issues.map((issue) => issue.suggestedFix).join('\n')
+      : ''
+  };
+}
+
+async function runMultiAgentMarkdownImport(settings, fileName, markdown, headings, chunks, onProgress = () => {}) {
+  const projectBrief = createProjectBrief(fileName, markdown);
+  const sourceManifest = sourceManifestFor(fileName, chunks);
+  const globalConstraints = globalImportConstraints();
+  const job = createAgentJob(projectBrief, sourceManifest);
+  const progress = (value) => onProgress({ ...value, runId: job.id });
+  const usageRecords = [];
+  const evidenceBatches = [];
+
+  for (const [index, chunk] of chunks.entries()) {
+    const task = {
+      sourceId: 'source_1',
+      fileName,
+      chunkId: `chunk_${index + 1}`,
+      chunkIndex: index + 1,
+      chunkCount: chunks.length,
+      headingPath: headingPathForChunk(chunk),
+      chunkText: chunk
+    };
+    progress({
       stage: 'extracting',
-      message: batches.length === 1 ? '正在抽取文档知识点' : `正在抽取第 ${index + 1}/${batches.length} 批知识点`,
+      message: `正在抽取第 ${index + 1}/${chunks.length} 个文档块的证据`,
       fileName,
       current: index + 1,
-      total: batches.length,
-      percent: Math.round(((index + 1) / Math.max(batches.length, 1)) * 65),
-      detail: batch.label
+      total: chunks.length,
+      percent: 18 + Math.round(((index + 1) / Math.max(chunks.length, 1)) * 24),
+      detail: task.headingPath.join(' / ') || task.chunkId
     });
-    const result = await runAgent(
+    const result = await runAgentStep(
       settings,
-      'markdown.knowledge-extractor',
-      [
-        `文件名：${fileName}`,
-        `标题结构：\n${headingText}`,
-        `抽取批次：${index + 1}/${batches.length} (${batch.label})`,
-        `原始 Markdown 分块总数：${chunks.length}`,
-        batch.content
-      ].join('\n\n'),
+      job.id,
+      'document.ingestor',
+      buildAgentUserPrompt({
+        projectBrief,
+        sourceManifest,
+        globalConstraints,
+        task,
+        evidence: undefined,
+        instruction: '请从当前 chunk 中抽取 EvidenceBatch。'
+      }),
       'import-markdown',
       { json: true }
     );
-    extractedKnowledge.push({
-      batch: batch.label,
-      result: result.json
-    });
+    evidenceBatches.push(normalizeEvidenceBatch(result.json, task, chunk));
     if (result.usageRecord) usageRecords.push(result.usageRecord);
   }
 
-  onProgress({
-    stage: 'organizing',
-    message: '知识点抽取完成，正在整理学科结构',
+  const evidenceItems = dedupeEvidenceItems(evidenceBatches);
+  progress({
+    stage: 'analyzing',
+    message: `已抽取 ${evidenceItems.length} 条证据，正在进行项目整体技术分析`,
     fileName,
-    current: batches.length,
-    total: batches.length,
-    percent: 72
+    current: evidenceItems.length,
+    total: evidenceItems.length,
+    percent: 46
   });
+  const analysisContext = buildProjectAnalysisContext(fileName, markdown, headings, chunks, evidenceBatches, evidenceItems);
+  const analysisResult = await runAgentStep(
+    settings,
+    job.id,
+    'project.analysis-master',
+    buildAgentUserPrompt({
+      projectBrief,
+      sourceManifest,
+      globalConstraints,
+      task: analysisContext,
+      evidence: analysisContext.evidenceCards,
+      instruction: [
+        '请生成完整 SubjectKnowledgeMap。',
+        '第一篇 note 必须是“项目整体技术分析”。',
+        '后续笔记按分析逻辑生成，不要复制原文目录。',
+        '每篇笔记都必须讲清：需求或问题背景、对应技术实现、关键设计取舍、项目亮点或面试价值、可继续优化方向。',
+        'cases、pitfalls、interviewQuestions 由你基于整体理解生成，不要留空。'
+      ].join('\n')
+    }),
+    'import-markdown',
+    { json: true }
+  );
+  if (analysisResult.usageRecord) usageRecords.push(analysisResult.usageRecord);
+  let knowledgeMap = normalizeSubjectKnowledgeMap(analysisResult.json, fileName, markdown);
 
-  return {
-    content: JSON.stringify({
+  progress({
+    stage: 'validating',
+    message: '正在校验项目分析质量',
+    fileName,
+    percent: 88
+  });
+  let criticReport = null;
+  try {
+    const criticResult = await runAgentStep(
+      settings,
+      job.id,
+      'project.analysis-critic',
+      buildAgentUserPrompt({
+        projectBrief,
+        sourceManifest,
+        globalConstraints,
+        task: {
+          analysisContext,
+          knowledgeMap
+        },
+        evidence: evidenceItems.map(compactEvidenceItem),
+        instruction: [
+          '请生成项目分析质量报告。',
+          '如果只是复述目录、缺少需求与技术实现关系、缺少技术价值或出现摘录式模板，必须判为不合格。',
+          '如果不合格，请给出面向 project.analysis-master 的整体 rewriteInstruction。'
+        ].join('\n')
+      }),
+      'import-markdown',
+      { json: true }
+    );
+    if (criticResult.usageRecord) usageRecords.push(criticResult.usageRecord);
+    criticReport = normalizeAnalysisCriticReport(criticResult.json);
+  } catch (error) {
+    console.warn('Analysis critic failed, using local validation:', error);
+    criticReport = localAnalysisCriticReport(knowledgeMap);
+  }
+
+  if (!criticReport.ok) {
+    progress({
+      stage: 'analyzing',
+      message: '质量校验未通过，正在整体重写项目分析',
       fileName,
-      headingStructure: headingText,
-      markdownChunkCount: chunks.length,
-      extractionBatchCount: batches.length,
-      extractedKnowledge
-    }, null, 2),
-    usageRecords
+      percent: 91
+    });
+    const rewriteContext = buildProjectAnalysisContext(
+      fileName,
+      markdown,
+      headings,
+      chunks,
+      evidenceBatches,
+      evidenceItems,
+      criticReport
+    );
+    const rewriteResult = await runAgentStep(
+      settings,
+      job.id,
+      'project.analysis-master',
+      buildAgentUserPrompt({
+        projectBrief,
+        sourceManifest,
+        globalConstraints,
+        task: rewriteContext,
+        evidence: rewriteContext.evidenceCards,
+        instruction: [
+          '这是整体重写。上一版质量校验未通过。',
+          criticReport.rewriteInstruction || criticReport.issues.map((issue) => `${issue.message} ${issue.suggestedFix}`).join('\n'),
+          '请重新生成完整 SubjectKnowledgeMap。不要局部修补，不要复述原文目录。'
+        ].join('\n\n')
+      }),
+      'import-markdown',
+      { json: true }
+    );
+    if (rewriteResult.usageRecord) usageRecords.push(rewriteResult.usageRecord);
+    knowledgeMap = normalizeSubjectKnowledgeMap(rewriteResult.json, fileName, markdown);
+  }
+
+  progress({
+    stage: 'normalizing',
+    message: '正在校正项目分析知识地图结构',
+    fileName,
+    percent: 94
+  });
+  updateAgentJobStatus(job.id, 'completed');
+  return {
+    knowledgeMap,
+    usageRecord: aggregateUsageRecords(usageRecords, settings, 'import-markdown'),
+    validationReport: criticReport
   };
 }
 
@@ -479,37 +1244,156 @@ function inferMarkdownSubject(fileName, markdown) {
   return '综合学习';
 }
 
-function localMarkdownImportDraft(fileName, markdown) {
-  const headings = extractMarkdownHeadings(markdown);
-  const subject = inferMarkdownSubject(fileName, markdown);
-  const cleanName = path.basename(fileName, path.extname(fileName)) || 'Markdown 文档';
-  const topHeadings = headings.filter((heading) => heading.level <= 2).slice(0, 8);
-  const isProject = subject === '项目技术方案';
-  const headingText = topHeadings.map((heading) => `- ${heading.title}`).join('\n');
-  const summary = isProject
-    ? `该文档围绕 ${cleanName} 的项目背景、功能能力、技术实现和工程取舍展开。建议按“功能全景、技术架构、亮点能力、关键难点、解决方案、可复用经验”来学习。`
-    : `该文档围绕 ${cleanName} 的核心知识展开。建议按“学科名、主题、核心笔记、分笔记、案例、易错点、复习问题”来学习。`;
+function cleanMarkdownInline(value) {
+  return String(value || '')
+    .replace(/!\[[^\]]*]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+    .replace(/[`*_#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
-  const subNotes = (topHeadings.length ? topHeadings : [{ title: '核心内容', level: 1 }]).slice(0, 6).map((heading, index) => ({
-    title: heading.title,
+function cleanMarkdownBlock(value) {
+  return String(value || '')
+    .replace(/```[\s\S]*?```/g, (block) => {
+      const lines = block.split(/\r?\n/).slice(0, 18).join('\n');
+      return `${lines}${block.length > lines.length ? '\n...' : ''}`;
+    })
+    .replace(/!\[[^\]]*]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function splitMarkdownSections(markdown) {
+  const source = String(markdown || '');
+  const matches = Array.from(source.matchAll(/^(#{1,4})\s+(.+)$/gm));
+  if (!matches.length) {
+    return [{
+      level: 1,
+      title: '核心内容',
+      headingPath: ['核心内容'],
+      content: cleanMarkdownBlock(source)
+    }];
+  }
+
+  const sections = [];
+  const pathStack = [];
+  matches.forEach((match, index) => {
+    const level = match[1].length;
+    const title = cleanMarkdownInline(match[2]);
+    const start = match.index || 0;
+    const nextStart = index + 1 < matches.length ? matches[index + 1].index || source.length : source.length;
+    const raw = source.slice(start + match[0].length, nextStart).trim();
+    pathStack[level - 1] = title;
+    pathStack.length = level;
+    sections.push({
+      level,
+      title,
+      headingPath: pathStack.filter(Boolean),
+      content: cleanMarkdownBlock(raw)
+    });
+  });
+  return sections.filter((section) => section.title);
+}
+
+function firstMeaningfulParagraph(text, max = 360) {
+  const paragraph = String(text || '')
+    .split(/\n{2,}|\r?\n(?=\S)/)
+    .map((item) => cleanMarkdownInline(item))
+    .find((item) => item.length > 20);
+  return clipText(paragraph || cleanMarkdownInline(text), max);
+}
+
+function extractContentBullets(text, limit = 8) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => cleanMarkdownInline(line.replace(/^\s*[-*+]\s+/, '').replace(/^\s*\d+[.)]\s+/, '')))
+    .filter((line) => line.length >= 10 && !/^[-=]+$/.test(line));
+  const seen = new Set();
+  return lines.filter((line) => {
+    const key = line.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, limit);
+}
+
+function pickSectionSignals(text, pattern, limit = 5) {
+  return extractContentBullets(text, 30)
+    .filter((line) => pattern.test(line))
+    .slice(0, limit);
+}
+
+function buildLocalSectionDraft(section, subject, cleanName) {
+  const content = section.content || '';
+  const summary = firstMeaningfulParagraph(content) || `该部分围绕“${section.title}”展开，原文内容较少。`;
+  const bullets = extractContentBullets(content, 10);
+  const technicalSignals = pickSectionSignals(
+    content,
+    /架构|实现|Agent|RAG|SQLite|Electron|React|TypeScript|模型|prompt|检索|数据库|同步|安全|成本|token|fallback|导入|编排|校验|重试|质量|技术|工程/i,
+    8
+  );
+  const challengeSignals = pickSectionSignals(content, /问题|不足|难点|风险|失败|缺少|优化|债|边界|限制|fallback|重试/i, 5);
+  const caseSignals = pickSectionSignals(content, /例如|比如|案例|流程|场景|用户|导入|对话|笔记|Markdown/i, 4);
+
+  return {
+    title: section.title,
     subject,
-    topic: heading.title,
-    tags: [subject, cleanName],
-    summary: `围绕“${heading.title}”整理该文档中的关键概念、实现方式、判断标准和可复用经验。`,
+    topic: section.headingPath[0] || section.title,
+    tags: Array.from(new Set([subject, cleanName, ...section.headingPath.slice(0, 2)])),
+    summary,
     sections: [
       {
-        heading: '关键要点',
-        content: '基于原始 Markdown 自动生成的分笔记。建议接入模型后重新导入，可获得更准确的提炼。'
+        heading: '原文摘要',
+        content: summary
       },
       {
-        heading: '原文结构线索',
-        content: headingText || '原文没有明显标题结构。'
+        heading: '关键内容',
+        content: bullets.length
+          ? bullets.map((line) => `- ${line}`).join('\n')
+          : '该标题下没有足够正文，建议补充开发日志或切换到模型导入。'
+      },
+      {
+        heading: '技术线索',
+        content: technicalSignals.length
+          ? technicalSignals.map((line) => `- ${line}`).join('\n')
+          : '原文没有明确技术实现线索，本地兜底不额外编造。'
+      },
+      {
+        heading: '原文摘录',
+        content: clipText(content, 1800) || '该标题下没有正文内容。'
       }
     ],
-    cases: [],
-    pitfalls: [],
-    interviewQuestions: [`请解释“${heading.title}”在该文档中的作用和关键结论。`]
-  }));
+    cases: caseSignals,
+    pitfalls: challengeSignals.length
+      ? challengeSignals
+      : ['本地兜底只整理原文，不会推断材料中没有的工程难点或解决方案。'],
+    interviewQuestions: [
+      `请结合原文说明“${section.title}”在项目中的作用。`,
+      `这一部分有哪些具体实现或工程取舍？请避免只复述标题。`,
+      `如果面试官追问“${section.title}”的难点，你能从原文中找到哪些证据？`
+    ],
+    subNotes: []
+  };
+}
+
+function localMarkdownImportDraft(fileName, markdown) {
+  const subject = inferMarkdownSubject(fileName, markdown);
+  const cleanName = path.basename(fileName, path.extname(fileName)) || 'Markdown 文档';
+  const sections = splitMarkdownSections(markdown);
+  const topSections = sections.filter((section) => section.level <= 2).slice(0, 8);
+  const isProject = subject === '项目技术方案';
+  const headingText = topSections.map((section) => `- ${section.title}`).join('\n');
+  const wholeText = cleanMarkdownBlock(markdown);
+  const summary = isProject
+    ? `本地兜底已从 ${cleanName} 的原文中整理标题结构、正文摘录和技术线索。由于当前未使用模型，以下内容以忠实整理原文为主，不额外推断项目亮点。`
+    : `本地兜底已从 ${cleanName} 的原文中整理标题结构、正文摘录和关键条目。由于当前未使用模型，以下内容以忠实整理原文为主。`;
+
+  const subNotes = (topSections.length ? topSections : sections).slice(0, 8).map((section) =>
+    buildLocalSectionDraft(section, subject, cleanName)
+  );
 
   return {
     title: `${cleanName} 知识地图`,
@@ -523,16 +1407,16 @@ function localMarkdownImportDraft(fileName, markdown) {
         content: headingText || '原文没有明显标题结构，已根据全文生成概览。'
       },
       {
-        heading: isProject ? '技术重点与难点' : '核心知识点',
-        content: '建议重点关注文档中反复出现的概念、模块边界、设计选择、问题约束和解决方案。'
+        heading: isProject ? '原文技术线索' : '原文核心内容',
+        content: extractContentBullets(wholeText, 12).map((line) => `- ${line}`).join('\n') || clipText(wholeText, 1600)
       },
       {
-        heading: '学习路线',
-        content: '1. 先读主笔记掌握全局。\n2. 再按分笔记逐个主题拆解。\n3. 最后用面试问题检查是否能讲清楚亮点、难点和取舍。'
+        heading: '本地兜底说明',
+        content: '当前内容来自本地规则对原文的切分、摘录和关键词整理；如果需要面试级提炼、跨段落归纳和技术价值判断，需要在设置中接入 Ollama 或 OpenAI-compatible 模型后重新导入。'
       }
     ],
-    cases: isProject ? ['把文档中的一个功能模块作为案例，说明它的用户价值、技术实现和工程取舍。'] : [],
-    pitfalls: ['只复述目录但没有提炼关键取舍。', '只看实现细节但忽略问题背景和边界条件。'],
+    cases: pickSectionSignals(wholeText, /例如|比如|案例|流程|场景|用户|导入|对话|笔记|Markdown/i, 4),
+    pitfalls: pickSectionSignals(wholeText, /问题|不足|难点|风险|失败|缺少|优化|债|边界|限制/i, 5),
     interviewQuestions: isProject
       ? ['这个项目解决了什么问题？', '项目的核心技术亮点是什么？', '遇到的主要难点是什么，对应方案是什么？']
       : ['这个主题的核心概念是什么？', '有哪些容易混淆的边界？', '如何用案例说明这个知识点？'],
@@ -573,35 +1457,45 @@ function normalizeMarkdownImportDraft(value, fileName, markdown) {
 function localMarkdownKnowledgeMap(fileName, markdown) {
   const root = localMarkdownImportDraft(fileName, markdown);
   const subject = root.subject || inferMarkdownSubject(fileName, markdown);
-  const headings = extractMarkdownHeadings(markdown).filter((heading) => heading.level <= 2);
   const cleanName = path.basename(fileName, path.extname(fileName)) || 'Markdown 文档';
   const isProject = subject === '项目技术方案';
   const fallbackTopics = isProject
     ? ['功能全景', '技术架构', '核心亮点', '技术难点与解决方案', '工程实践与可复用经验']
     : ['核心概念', '关键机制', '案例应用', '易错边界', '复习面试'];
-  const topicTitles = (headings.length ? headings.map((heading) => heading.title) : fallbackTopics)
-    .map((title) => String(title || '').trim())
-    .filter(Boolean)
+  const sections = splitMarkdownSections(markdown);
+  const topicSections = sections.filter((section) => section.level <= 2);
+  const selectedSections = (topicSections.length ? topicSections : sections)
+    .filter((section) => section.title)
     .slice(0, 10);
-  const uniqueTopics = Array.from(new Set(topicTitles.length ? topicTitles : fallbackTopics));
+  const fallbackSectionMap = fallbackTopics.map((title) => ({
+    level: 1,
+    title,
+    headingPath: [title],
+    content: cleanMarkdownBlock(markdown)
+  }));
+  const finalSections = selectedSections.length ? selectedSections : fallbackSectionMap;
+  const seenTitles = new Set();
 
   return {
     subject,
     title: `${cleanName} 知识地图`,
     overview: root.summary,
     tags: root.tags,
-    topics: uniqueTopics.map((topicTitle, index) => {
-      const sourceDraft = root.subNotes?.[index] || root.subNotes?.[0] || root;
+    topics: finalSections.map((section, index) => {
+      const topicTitle = section.headingPath[0] || section.title || fallbackTopics[index] || `主题 ${index + 1}`;
+      const uniqueTitle = seenTitles.has(topicTitle) ? `${topicTitle} ${index + 1}` : topicTitle;
+      seenTitles.add(topicTitle);
+      const sourceDraft = buildLocalSectionDraft(section, subject, cleanName);
       return {
-        title: topicTitle,
-        summary: `围绕“${topicTitle}”整理 ${cleanName} 中的关键内容。`,
+        title: uniqueTitle,
+        summary: sourceDraft.summary || `围绕“${uniqueTitle}”整理 ${cleanName} 中的关键内容。`,
         notes: [
           {
             ...sourceDraft,
-            title: sourceDraft.title === root.title ? topicTitle : sourceDraft.title,
+            title: sourceDraft.title === root.title ? uniqueTitle : sourceDraft.title,
             subject,
-            topic: topicTitle,
-            tags: Array.from(new Set([...(sourceDraft.tags || []), topicTitle])),
+            topic: uniqueTitle,
+            tags: Array.from(new Set([...(sourceDraft.tags || []), uniqueTitle])),
             subNotes: []
           }
         ]
@@ -610,23 +1504,97 @@ function localMarkdownKnowledgeMap(fileName, markdown) {
   };
 }
 
+function enrichAnalysisSections(sections, summary, title) {
+  const cleanSections = (sections || [])
+    .map((section) => ({
+      heading: textFromValue(section.heading || '小节'),
+      content: textFromValue(section.content)
+    }))
+    .filter((section) => section.heading && section.content);
+  const joined = [summary, ...cleanSections.map((section) => `${section.heading}\n${section.content}`)].join('\n\n');
+  const hasNeed = /需求|问题|背景|目标|为什么/.test(joined);
+  const hasImplementation = /实现|架构|数据|模块|流程|技术|SQLite|RAG|Agent|Electron|React|模型/.test(joined);
+  const hasTradeoff = /取舍|权衡|原因|边界|约束|复杂度|成本|安全|失败|兜底/.test(joined);
+  const hasValue = /亮点|价值|面试|可复用|优势|体现|追问/.test(joined);
+  const hasFuture = /优化|演进|未来|后续|扩展|升级|改进/.test(joined);
+
+  if (cleanSections.length >= 4 && hasNeed && hasImplementation && hasTradeoff && hasValue) {
+    return cleanSections;
+  }
+
+  const summaryText = summary || firstMeaningfulParagraph(joined, 500) || `当前材料对“${title}”的细节不足。`;
+  const findLines = (pattern, fallback) => {
+    const hits = extractContentBullets(joined, 18).filter((line) => pattern.test(line)).slice(0, 5);
+    return hits.length ? hits.map((line) => `- ${line}`).join('\n') : fallback;
+  };
+  const existingText = cleanSections.length
+    ? cleanSections.map((section) => `### ${section.heading}\n${section.content}`).join('\n\n')
+    : summaryText;
+
+  return [
+    {
+      heading: '需求与问题背景',
+      content: hasNeed
+        ? findLines(/需求|问题|背景|目标|为什么|用户|场景/, summaryText)
+        : `当前材料没有把“${title}”的问题背景展开说明。已有线索：${summaryText}`
+    },
+    {
+      heading: '技术实现机制',
+      content: hasImplementation
+        ? findLines(/实现|架构|数据|模块|流程|技术|SQLite|RAG|Agent|Electron|React|模型|检索|存储/, existingText)
+        : `当前材料没有提供足够实现细节。已有内容：${clipText(existingText, 900)}`
+    },
+    {
+      heading: '工程取舍与设计原因',
+      content: hasTradeoff
+        ? findLines(/取舍|权衡|原因|边界|约束|复杂度|成本|安全|失败|兜底|本地|质量/, existingText)
+        : '当前材料没有明确说明该部分的工程取舍，后续开发日志应补充为什么这样设计、替代方案是什么、牺牲了什么。'
+    },
+    {
+      heading: '项目亮点与面试表达',
+      content: hasValue
+        ? findLines(/亮点|价值|面试|可复用|优势|体现|追问|技术含量|质量/, existingText)
+        : `面试表达可以围绕“${title}”说明它解决的问题、实现路径和可验证结果，但当前材料还需要补充更具体的项目证据。`
+    },
+    {
+      heading: '可继续优化方向',
+      content: hasFuture
+        ? findLines(/优化|演进|未来|后续|扩展|升级|改进|计划/, existingText)
+        : '可继续补充：质量评估指标、自动化测试、失败重试策略、运行成本对比、用户实际使用反馈。'
+    }
+  ];
+}
+
 function normalizeNoteDraftForTopic(value, fallbackDraft, subject, topic) {
   const source = value && typeof value === 'object' ? value : {};
   const fallback = fallbackDraft || localGeneratedNote(topic);
+  const sourceSections = Array.isArray(source.sections)
+    ? source.sections
+        .map((section) => ({
+          heading: textFromValue(section?.heading || section?.title || section?.name || '小节'),
+          content: textFromValue(section?.content || section?.detail || section?.summary || section)
+        }))
+        .filter((section) => section.heading && section.content)
+    : [];
+  const sourceSummary = textFromValue(source.summary || fallback.summary || '');
+  const fallbackSections = Array.isArray(fallback.sections)
+    ? fallback.sections.map((section) => ({
+        heading: textFromValue(section?.heading || '小节'),
+        content: textFromValue(section?.content || section)
+      })).filter((section) => section.heading && section.content)
+    : [];
+  const normalizedSections = enrichAnalysisSections(
+    sourceSections.length ? sourceSections : fallbackSections,
+    sourceSummary,
+    String(source.title || fallback.title || topic || '未命名笔记').trim()
+  );
   const normalized = {
     title: String(source.title || fallback.title || topic || '未命名笔记').trim(),
     subject: String(source.subject || subject || fallback.subject || '综合学习').trim(),
     topic: String(source.topic || topic || fallback.topic || '未命名主题').trim(),
     tags: asStringList(source.tags).length ? asStringList(source.tags) : asStringList(fallback.tags),
-    summary: String(source.summary || fallback.summary || '').trim(),
-    sections: Array.isArray(source.sections)
-      ? source.sections
-          .map((section) => ({
-            heading: String(section?.heading || '小节').trim(),
-            content: String(section?.content || '').trim()
-          }))
-          .filter((section) => section.content)
-      : fallback.sections,
+    summary: sourceSummary,
+    sections: normalizedSections,
     cases: asStringList(source.cases).length ? asStringList(source.cases) : asStringList(fallback.cases),
     pitfalls: asStringList(source.pitfalls).length ? asStringList(source.pitfalls) : asStringList(fallback.pitfalls),
     interviewQuestions: asStringList(source.interviewQuestions).length
@@ -724,9 +1692,50 @@ function formatDialogue(messages, limit = 14) {
     .join('\n');
 }
 
+function textFromValue(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim();
+  }
+  if (Array.isArray(value)) {
+    return value.map(textFromValue).filter(Boolean).join('\n');
+  }
+  if (typeof value === 'object') {
+    const preferred = [
+      'title',
+      'heading',
+      'question',
+      'name',
+      'summary',
+      'detail',
+      'content',
+      'description',
+      'reason',
+      'answer',
+      'example',
+      'case',
+      'pitfall',
+      'suggestion'
+    ];
+    const parts = preferred
+      .filter((key) => value[key] !== undefined && value[key] !== null)
+      .map((key) => textFromValue(value[key]))
+      .filter(Boolean);
+    if (parts.length) return parts.join('：');
+    return Object.entries(value)
+      .map(([key, item]) => {
+        const text = textFromValue(item);
+        return text ? `${key}: ${text}` : '';
+      })
+      .filter(Boolean)
+      .join('；');
+  }
+  return String(value).trim();
+}
+
 function asStringList(value) {
   if (!Array.isArray(value)) return [];
-  return value.map((item) => String(item || '').trim()).filter(Boolean);
+  return value.map(textFromValue).filter(Boolean);
 }
 
 function localConversationMemory(note, previousSummary, messages) {
@@ -1041,6 +2050,16 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
   const filePath = result.filePaths[0];
   const fileName = path.basename(filePath);
   const settings = payload?.settings || {};
+  if ((settings.provider || 'local') === 'local') {
+    const message = '当前需要配置 Ollama 或 OpenAI-compatible 模型才能生成项目技术分析笔记，未生成 AI 分析笔记。';
+    sendMarkdownImportProgress(event, {
+      stage: 'error',
+      message,
+      fileName,
+      percent: 100
+    });
+    throw new Error(message);
+  }
   sendMarkdownImportProgress(event, {
     stage: 'reading-file',
     message: '正在读取 Markdown 文档',
@@ -1066,34 +2085,16 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
   });
 
   try {
-    const importContent = await buildMarkdownImportContent(settings, fileName, headings, chunks, (progress) => {
+    const result = await runMultiAgentMarkdownImport(settings, fileName, markdown, headings, chunks, (progress) => {
       sendMarkdownImportProgress(event, progress);
     });
-    sendMarkdownImportProgress(event, {
-      stage: 'organizing',
-      message: '正在生成多主题知识地图',
-      fileName,
-      percent: 78
-    });
-    const organizerResult = await runAgent(
-      settings,
-      'knowledge.organizer',
-      importContent.content,
-      'import-markdown',
-      { json: true }
-    );
     sendMarkdownImportProgress(event, {
       stage: 'normalizing',
       message: '正在校正知识地图结构',
       fileName,
       percent: 90
     });
-    const usageRecord = aggregateUsageRecords(
-      [...importContent.usageRecords, organizerResult.usageRecord],
-      settings,
-      'import-markdown'
-    ) || organizerResult.usageRecord;
-    const knowledgeMap = normalizeSubjectKnowledgeMap(organizerResult.json, fileName, markdown);
+    const knowledgeMap = normalizeSubjectKnowledgeMap(result.knowledgeMap, fileName, markdown);
     sendMarkdownImportProgress(event, {
       stage: 'done',
       message: `已生成 ${knowledgeMap.topics?.length || 0} 个主题的知识地图`,
@@ -1107,38 +2108,23 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
       fileName,
       knowledgeMap,
       usedFallback: false,
-      message: '已从 Markdown 生成知识地图',
-      usageRecord
+      message: result.validationReport?.ok === false
+        ? '已生成项目技术分析笔记，质量校验发现少量待优化项'
+        : '已生成项目技术分析笔记',
+      usageRecord: result.usageRecord
     };
   } catch (error) {
     const message = error?.message === 'LOCAL_PROVIDER'
-      ? '已使用本地规则导入 Markdown'
-      : `模型调用失败，已使用本地规则导入 Markdown：${error?.message || '未知错误'}`;
-    if (error?.message !== 'LOCAL_PROVIDER') {
-      console.warn('Falling back to local Markdown import:', error);
-    }
+      ? '当前需要配置 Ollama 或 OpenAI-compatible 模型才能生成项目技术分析笔记，未生成 AI 分析笔记。'
+      : `模型调用失败，未生成 AI 分析笔记：${error?.message || '未知错误'}`;
+    console.warn('Markdown AI analysis import failed:', error);
     sendMarkdownImportProgress(event, {
-      stage: 'fallback',
+      stage: 'error',
       message,
       fileName,
-      percent: 84
-    });
-    const knowledgeMap = localMarkdownKnowledgeMap(fileName, markdown);
-    sendMarkdownImportProgress(event, {
-      stage: 'done',
-      message: `已使用本地规则生成 ${knowledgeMap.topics?.length || 0} 个主题`,
-      fileName,
-      current: knowledgeMap.topics?.length || 0,
-      total: knowledgeMap.topics?.length || 0,
       percent: 100
     });
-    return {
-      filePath,
-      fileName,
-      knowledgeMap,
-      usedFallback: true,
-      message
-    };
+    throw new Error(message);
   }
 });
 
