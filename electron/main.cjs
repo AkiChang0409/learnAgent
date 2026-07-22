@@ -227,6 +227,69 @@ async function callModel(settings, system, messages, operation = 'unknown') {
   };
 }
 
+const AGENT_REGISTRY = {
+  'note.generator': {
+    name: '知识点生成 Agent',
+    system: [
+      '你是一个严谨的学习智能体，负责把用户当天学习的主题生成结构化中文笔记。',
+      '你需要识别学科和主题，并补充相关知识总结、案例、易错点、面试问题。',
+      '只输出一个 JSON 对象，不要输出 Markdown。',
+      'JSON 字段：title, subject, topic, tags, summary, sections, cases, pitfalls, interviewQuestions。',
+      'sections 是数组，每项包含 heading 和 content。tags/cases/pitfalls/interviewQuestions 都是字符串数组。'
+    ].join('\n')
+  },
+  'markdown.knowledge-extractor': {
+    name: '知识抽取 Agent',
+    system: [
+      '你是知识抽取 Agent，只负责从输入材料中抽取原子知识点，不负责最终编排。',
+      '输入可能来自完整 Markdown 或长文档分块，可能是学科资料，也可能是项目开发文档。',
+      '抽取时保留事实、模块、概念、功能、技术点、难点、解决方案、工程取舍、案例、易错点、复习问题。',
+      '不要写成完整文章，不要泛泛总结，不要遗漏文档里明确出现的重要点。',
+      '只输出 JSON 对象，不要输出 Markdown。',
+      'JSON 字段：documentType, subjectHints, items。',
+      'documentType 只能是 project、subject、mixed。subjectHints 是字符串数组。',
+      'items 是数组，每项包含 kind, title, detail, topicHint, evidence, importance。',
+      'kind 可用 concept、feature、module、technical-point、challenge、solution、tradeoff、case、pitfall、question、workflow。importance 为 1-5。'
+    ].join('\n')
+  },
+  'knowledge.organizer': {
+    name: '知识整理 Agent',
+    system: [
+      '你是知识整理 Agent，只负责把已抽取的知识点整理成可落库的学科知识地图。',
+      '你不需要重新抽取原文，也不要把所有内容塞进一篇笔记。',
+      '必须输出多主题、多笔记结构：一个 subject 下应有多个 topics，每个 topic 下应有若干 notes。',
+      '如果材料是项目文档，主题应覆盖：功能全景、技术架构、核心亮点、技术难点与解决方案、工程实践与可复用经验。可按文档内容调整命名。',
+      '如果材料是学科资料，主题应按概念体系、核心机制、案例应用、易错边界、复习面试来组织。可按文档内容调整命名。',
+      '每篇 note 聚焦一个相对独立的知识点或项目能力，不要过长；重点完整但不啰嗦。',
+      '只输出 JSON 对象，不要输出 Markdown。',
+      'JSON 字段：subject, title, overview, tags, topics。',
+      'topics 是数组，每项包含 title, summary, notes。',
+      'notes 是数组，每项包含 title, tags, summary, sections, cases, pitfalls, interviewQuestions, subNotes。',
+      'subNotes 可为空；只有当某篇 note 下面确实需要进一步拆分时才使用。sections 是数组，每项包含 heading 和 content。'
+    ].join('\n')
+  }
+};
+
+async function runAgent(settings, agentId, userContent, operation, options = {}) {
+  const agent = AGENT_REGISTRY[agentId];
+  if (!agent) {
+    throw new Error(`Unknown agent: ${agentId}`);
+  }
+  const modelResult = await callModel(
+    settings,
+    agent.system,
+    [{ role: 'user', content: userContent }],
+    operation
+  );
+  return {
+    agentId,
+    agentName: agent.name,
+    content: modelResult.content,
+    json: options.json ? extractJson(modelResult.content) : null,
+    usageRecord: modelResult.usageRecord
+  };
+}
+
 function extractJson(text) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const source = fenced ? fenced[1] : text;
@@ -336,55 +399,47 @@ function chunkMarkdown(markdown, maxChars = 9000) {
 
 async function buildMarkdownImportContent(settings, fileName, headings, chunks) {
   const headingText = headings.map((heading) => `${'#'.repeat(heading.level)} ${heading.title}`).join('\n') || '无明显标题';
-  if (chunks.length <= 6) {
-    return {
-      content: [
-        `文件名：${fileName}`,
-        `标题结构：\n${headingText}`,
-        `全文分块数量：${chunks.length}`,
-        chunks.map((chunk, index) => `--- Markdown Chunk ${index + 1}/${chunks.length} ---\n${chunk}`).join('\n\n')
-      ].join('\n\n'),
-      usageRecords: []
-    };
-  }
-
-  const chunkSystem = [
-    '你是一个项目文档和学习资料分析助手。',
-    '你会收到 Markdown 的一个连续分块，需要提取该分块里的有效知识，不要扩写。',
-    '如果是项目文档，提取功能点、技术实现、亮点、难点、解决方案、工程取舍和可复用经验。',
-    '如果是学科资料，提取概念、案例、易错点、边界条件和复习问题。',
-    '输出简洁中文要点，保留事实和判断依据。'
-  ].join('\n');
-  const summaries = [];
+  const batches = chunks.length <= 4
+    ? [{
+        label: 'full-document',
+        content: chunks.map((chunk, index) => `--- Markdown Chunk ${index + 1}/${chunks.length} ---\n${chunk}`).join('\n\n')
+      }]
+    : chunks.map((chunk, index) => ({
+        label: `chunk-${index + 1}-of-${chunks.length}`,
+        content: chunk
+      }));
+  const extractedKnowledge = [];
   const usageRecords = [];
 
-  for (const [index, chunk] of chunks.entries()) {
-    const result = await callModel(
+  for (const [index, batch] of batches.entries()) {
+    const result = await runAgent(
       settings,
-      chunkSystem,
-      [{
-        role: 'user',
-        content: [
-          `文件名：${fileName}`,
-          `标题结构：\n${headingText}`,
-          `当前分块：${index + 1}/${chunks.length}`,
-          chunk
-        ].join('\n\n')
-      }],
-      'import-markdown'
+      'markdown.knowledge-extractor',
+      [
+        `文件名：${fileName}`,
+        `标题结构：\n${headingText}`,
+        `抽取批次：${index + 1}/${batches.length} (${batch.label})`,
+        `原始 Markdown 分块总数：${chunks.length}`,
+        batch.content
+      ].join('\n\n'),
+      'import-markdown',
+      { json: true }
     );
-    summaries.push(`--- Chunk ${index + 1}/${chunks.length} 提炼 ---\n${result.content}`);
+    extractedKnowledge.push({
+      batch: batch.label,
+      result: result.json
+    });
     if (result.usageRecord) usageRecords.push(result.usageRecord);
   }
 
   return {
-    content: [
-      `文件名：${fileName}`,
-      `标题结构：\n${headingText}`,
-      `全文分块数量：${chunks.length}`,
-      '以下内容来自对完整 Markdown 的逐块提炼，请基于全部分块生成最终知识地图。',
-      summaries.join('\n\n')
-    ].join('\n\n'),
+    content: JSON.stringify({
+      fileName,
+      headingStructure: headingText,
+      markdownChunkCount: chunks.length,
+      extractionBatchCount: batches.length,
+      extractedKnowledge
+    }, null, 2),
     usageRecords
   };
 }
@@ -488,6 +543,118 @@ function normalizeMarkdownImportDraft(value, fileName, markdown) {
     .slice(0, 12)
     .map((subNote, index) => normalizeDraft(subNote, fallback.subNotes[index] || fallback.subNotes[0]));
   return root;
+}
+
+function localMarkdownKnowledgeMap(fileName, markdown) {
+  const root = localMarkdownImportDraft(fileName, markdown);
+  const subject = root.subject || inferMarkdownSubject(fileName, markdown);
+  const headings = extractMarkdownHeadings(markdown).filter((heading) => heading.level <= 2);
+  const cleanName = path.basename(fileName, path.extname(fileName)) || 'Markdown 文档';
+  const isProject = subject === '项目技术方案';
+  const fallbackTopics = isProject
+    ? ['功能全景', '技术架构', '核心亮点', '技术难点与解决方案', '工程实践与可复用经验']
+    : ['核心概念', '关键机制', '案例应用', '易错边界', '复习面试'];
+  const topicTitles = (headings.length ? headings.map((heading) => heading.title) : fallbackTopics)
+    .map((title) => String(title || '').trim())
+    .filter(Boolean)
+    .slice(0, 10);
+  const uniqueTopics = Array.from(new Set(topicTitles.length ? topicTitles : fallbackTopics));
+
+  return {
+    subject,
+    title: `${cleanName} 知识地图`,
+    overview: root.summary,
+    tags: root.tags,
+    topics: uniqueTopics.map((topicTitle, index) => {
+      const sourceDraft = root.subNotes?.[index] || root.subNotes?.[0] || root;
+      return {
+        title: topicTitle,
+        summary: `围绕“${topicTitle}”整理 ${cleanName} 中的关键内容。`,
+        notes: [
+          {
+            ...sourceDraft,
+            title: sourceDraft.title === root.title ? topicTitle : sourceDraft.title,
+            subject,
+            topic: topicTitle,
+            tags: Array.from(new Set([...(sourceDraft.tags || []), topicTitle])),
+            subNotes: []
+          }
+        ]
+      };
+    })
+  };
+}
+
+function normalizeNoteDraftForTopic(value, fallbackDraft, subject, topic) {
+  const source = value && typeof value === 'object' ? value : {};
+  const fallback = fallbackDraft || localGeneratedNote(topic);
+  const normalized = {
+    title: String(source.title || fallback.title || topic || '未命名笔记').trim(),
+    subject: String(source.subject || subject || fallback.subject || '综合学习').trim(),
+    topic: String(source.topic || topic || fallback.topic || '未命名主题').trim(),
+    tags: asStringList(source.tags).length ? asStringList(source.tags) : asStringList(fallback.tags),
+    summary: String(source.summary || fallback.summary || '').trim(),
+    sections: Array.isArray(source.sections)
+      ? source.sections
+          .map((section) => ({
+            heading: String(section?.heading || '小节').trim(),
+            content: String(section?.content || '').trim()
+          }))
+          .filter((section) => section.content)
+      : fallback.sections,
+    cases: asStringList(source.cases).length ? asStringList(source.cases) : asStringList(fallback.cases),
+    pitfalls: asStringList(source.pitfalls).length ? asStringList(source.pitfalls) : asStringList(fallback.pitfalls),
+    interviewQuestions: asStringList(source.interviewQuestions).length
+      ? asStringList(source.interviewQuestions)
+      : asStringList(fallback.interviewQuestions)
+  };
+  const fallbackSubNotes = Array.isArray(fallback.subNotes) ? fallback.subNotes : [];
+  const sourceSubNotes = Array.isArray(source.subNotes) ? source.subNotes : [];
+  normalized.subNotes = sourceSubNotes
+    .slice(0, 8)
+    .map((subNote, index) => normalizeNoteDraftForTopic(subNote, fallbackSubNotes[index] || normalized, subject, topic));
+  return normalized;
+}
+
+function normalizeSubjectKnowledgeMap(value, fileName, markdown) {
+  const fallback = localMarkdownKnowledgeMap(fileName, markdown);
+  const source = value && typeof value === 'object' ? value : {};
+  if (!Array.isArray(source.topics) && (source.title || source.subNotes)) {
+    return normalizeSubjectKnowledgeMap(localMarkdownKnowledgeMap(fileName, markdown), fileName, markdown);
+  }
+
+  const subject = String(source.subject || fallback.subject || inferMarkdownSubject(fileName, markdown)).trim();
+  const fallbackTopics = Array.isArray(fallback.topics) ? fallback.topics : [];
+  const sourceTopics = Array.isArray(source.topics) ? source.topics : fallbackTopics;
+  const topics = sourceTopics
+    .slice(0, 16)
+    .map((topic, index) => {
+      const fallbackTopic = fallbackTopics[index] || fallbackTopics[0] || { title: '核心主题', notes: [] };
+      const title = String(topic?.title || fallbackTopic.title || `主题 ${index + 1}`).trim();
+      const fallbackNotes = Array.isArray(fallbackTopic.notes) ? fallbackTopic.notes : [];
+      const sourceNotes = Array.isArray(topic?.notes) ? topic.notes : fallbackNotes;
+      return {
+        title,
+        summary: String(topic?.summary || fallbackTopic.summary || '').trim(),
+        notes: (sourceNotes.length ? sourceNotes : fallbackNotes)
+          .slice(0, 12)
+          .map((note, noteIndex) => normalizeNoteDraftForTopic(
+            note,
+            fallbackNotes[noteIndex] || fallbackNotes[0] || localGeneratedNote(title),
+            subject,
+            title
+          ))
+      };
+    })
+    .filter((topic) => topic.title && topic.notes.length);
+
+  return {
+    subject,
+    title: String(source.title || fallback.title || `${subject} 知识地图`).trim(),
+    overview: String(source.overview || fallback.overview || '').trim(),
+    tags: asStringList(source.tags).length ? asStringList(source.tags) : asStringList(fallback.tags),
+    topics: topics.length ? topics : fallback.topics
+  };
 }
 
 function inferSubject(input) {
@@ -804,22 +971,13 @@ ipcMain.handle('sync:import-package', async (event) => {
 ipcMain.handle('ai:generate-note', async (_event, payload) => {
   const input = payload?.input || '';
   const settings = payload?.settings || {};
-  const system = [
-    '你是一个严谨的学习智能体，负责把用户当天学习的主题生成结构化中文笔记。',
-    '你需要识别学科和主题，并补充相关知识总结、案例、易错点、面试问题。',
-    '只输出一个 JSON 对象，不要输出 Markdown。',
-    'JSON 字段：title, subject, topic, tags, summary, sections, cases, pitfalls, interviewQuestions。',
-    'sections 是数组，每项包含 heading 和 content。tags/cases/pitfalls/interviewQuestions 都是字符串数组。'
-  ].join('\n');
   try {
-    const modelResult = await callModel(settings, system, [{ role: 'user', content: input }], 'generate-note');
-    const raw = modelResult.content;
-    const parsed = extractJson(raw);
+    const agentResult = await runAgent(settings, 'note.generator', input, 'generate-note', { json: true });
     return {
-      draft: { ...localGeneratedNote(input), ...parsed },
+      draft: { ...localGeneratedNote(input), ...agentResult.json },
       usedFallback: false,
       message: '已使用配置模型生成笔记',
-      usageRecord: modelResult.usageRecord
+      usageRecord: agentResult.usageRecord
     };
   } catch (error) {
     const message = error?.message === 'LOCAL_PROVIDER'
@@ -856,36 +1014,25 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
   const markdown = await fs.readFile(filePath, 'utf8');
   const chunks = chunkMarkdown(markdown);
   const headings = extractMarkdownHeadings(markdown);
-  const system = [
-    '你是一个专业的学习笔记与项目文档分析 Agent。',
-    '用户会给你一个 Markdown 文档，可能是学科资料，也可能是项目开发完整文档。',
-    '你需要读取全部信息，生成一套层次化知识笔记：主笔记 + 分笔记。',
-    '如果是项目文档，必须提炼：项目功能、亮点、技术重点、难点、对应解决方案、可复用经验。',
-    '如果是学科资料，必须提炼：学科名、主题、核心知识点、案例、易错点、面试/复习问题。',
-    '要求：内容全面，不啰嗦；保留重点、取舍、难点和解决方案；不要泛泛而谈。',
-    '只输出一个 JSON 对象，不要输出 Markdown。',
-    'JSON 字段：title, subject, topic, tags, summary, sections, cases, pitfalls, interviewQuestions, subNotes。',
-    'subNotes 是数组，每项字段同主笔记，但不再包含 subNotes。sections 是数组，每项包含 heading 和 content。'
-  ].join('\n');
 
   try {
     const importContent = await buildMarkdownImportContent(settings, fileName, headings, chunks);
-    const modelResult = await callModel(
+    const organizerResult = await runAgent(
       settings,
-      system,
-      [{ role: 'user', content: importContent.content }],
-      'import-markdown'
+      'knowledge.organizer',
+      importContent.content,
+      'import-markdown',
+      { json: true }
     );
-    const parsed = extractJson(modelResult.content);
     const usageRecord = aggregateUsageRecords(
-      [...importContent.usageRecords, modelResult.usageRecord],
+      [...importContent.usageRecords, organizerResult.usageRecord],
       settings,
       'import-markdown'
-    ) || modelResult.usageRecord;
+    ) || organizerResult.usageRecord;
     return {
       filePath,
       fileName,
-      root: normalizeMarkdownImportDraft(parsed, fileName, markdown),
+      knowledgeMap: normalizeSubjectKnowledgeMap(organizerResult.json, fileName, markdown),
       usedFallback: false,
       message: '已从 Markdown 生成知识地图',
       usageRecord
@@ -900,7 +1047,7 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
     return {
       filePath,
       fileName,
-      root: localMarkdownImportDraft(fileName, markdown),
+      knowledgeMap: localMarkdownKnowledgeMap(fileName, markdown),
       usedFallback: true,
       message
     };

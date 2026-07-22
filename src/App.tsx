@@ -18,7 +18,7 @@ import { ToastHost, type ToastMessage } from './components/ToastHost';
 import { useAppData } from './hooks/useAppData';
 import { useAutosave } from './hooks/useAutosave';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
-import { createId, draftToNote, formatDate, markdownDraftToNotes, nowIso } from './services/notes';
+import { createId, draftToNote, formatDate, markdownDraftToNotes, nowIso, subjectKnowledgeMapToNotes } from './services/notes';
 import { retrieveContext } from './services/rag';
 
 function errorMessage(error: unknown) {
@@ -278,42 +278,31 @@ export default function App() {
     try {
       const result = await window.learnAgent.importMarkdown({ settings: data.settings });
       if (result.canceled) return;
-      if (!result.root) {
+      if (!result.knowledgeMap && !result.root) {
         pushToast('error', '导入失败：未生成有效笔记结构');
         return;
       }
 
-      const importedNotes = markdownDraftToNotes(result.root);
-      const rootNote = importedNotes[0];
-      if (!rootNote) {
+      const importedNotes = result.knowledgeMap
+        ? subjectKnowledgeMapToNotes(result.knowledgeMap)
+        : result.root
+          ? markdownDraftToNotes(result.root)
+          : [];
+      const firstNote = importedNotes[0];
+      if (!firstNote) {
         pushToast('error', '导入失败：Markdown 内容为空或无法整理');
         return;
       }
 
-      const subject = rootNote.subject || selectedSubject || '通用学习';
-      const topic = rootNote.topic || rootNote.title || '未命名主题';
+      const subject = result.knowledgeMap?.subject || firstNote.subject || selectedSubject || '通用学习';
       const now = nowIso();
-      const normalizedNotes = importedNotes.map((note, index) => {
-        if (index === 0) {
-          return {
-            ...note,
-            subject,
-            topic,
-            parentId: undefined,
-            position: 0,
-            updatedAt: now
-          };
-        }
-        return {
-          ...note,
-          subject: note.subject || subject,
-          topic,
-          parentId: rootNote.id,
-          position: index - 1,
-          updatedAt: now
-        };
-      });
-      const conversations: Conversation[] = normalizedNotes.map((note) => ({
+      const stampedNotes = importedNotes.map((note) => ({
+        ...note,
+        subject: note.subject || subject,
+        topic: note.topic || note.title || '未命名主题',
+        updatedAt: now
+      }));
+      const conversations: Conversation[] = stampedNotes.map((note) => ({
         id: createId('conversation'),
         noteId: note.id,
         title: note.title,
@@ -321,23 +310,43 @@ export default function App() {
         updatedAt: now
       }));
 
-      setData((current) => ({
-        ...current,
-        notes: [
-          { ...normalizedNotes[0], position: rootNotePosition(current.notes, subject, topic) },
-          ...normalizedNotes.slice(1),
-          ...current.notes
-        ],
-        conversations: [...conversations, ...current.conversations],
-        usageRecords: result.usageRecord
-          ? [...(current.usageRecords || []), result.usageRecord].slice(-1000)
-          : current.usageRecords
-      }));
+      setData((current) => {
+        const rootPositionByGroup = new Map<string, number>();
+        const positionedNotes = stampedNotes.map((note) => {
+          if (note.parentId) {
+            return {
+              ...note,
+              position: note.position ?? 0
+            };
+          }
+          const key = `${note.subject || subject}\u0000${note.topic || '未命名主题'}`;
+          const position = rootPositionByGroup.get(key)
+            ?? rootNotePosition(current.notes, note.subject || subject, note.topic || '未命名主题');
+          rootPositionByGroup.set(key, position + 1);
+          return {
+            ...note,
+            parentId: undefined,
+            position
+          };
+        });
+
+        return {
+          ...current,
+          notes: [
+            ...positionedNotes,
+            ...current.notes
+          ],
+          conversations: [...conversations, ...current.conversations],
+          usageRecords: result.usageRecord
+            ? [...(current.usageRecords || []), result.usageRecord].slice(-1000)
+            : current.usageRecords
+        };
+      });
       setSelectedSubject(subject);
-      setSelectedNoteId(rootNote.id);
+      setSelectedNoteId(firstNote.id);
       pushToast(
         result.usedFallback ? 'info' : 'success',
-        `${result.message || '已从 Markdown 生成知识地图'}：${normalizedNotes.length} 篇笔记`
+        `${result.message || '已从 Markdown 生成知识地图'}：${stampedNotes.length} 篇笔记`
       );
     } catch (error) {
       pushToast('error', `导入 Markdown 失败：${errorMessage(error)}`);

@@ -114,10 +114,25 @@ export interface MarkdownImportNoteDraft extends GeneratedNoteDraft {
   subNotes?: GeneratedNoteDraft[];
 }
 
+export interface SubjectKnowledgeTopicDraft {
+  title: string;
+  summary: string;
+  notes: MarkdownImportNoteDraft[];
+}
+
+export interface SubjectKnowledgeMap {
+  subject: string;
+  title: string;
+  overview: string;
+  tags: string[];
+  topics: SubjectKnowledgeTopicDraft[];
+}
+
 export interface MarkdownImportResult {
   canceled?: boolean;
   filePath?: string;
   fileName?: string;
+  knowledgeMap?: SubjectKnowledgeMap;
   root?: MarkdownImportNoteDraft;
   usedFallback?: boolean;
   message?: string;

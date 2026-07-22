@@ -1,4 +1,4 @@
-import type { AppData, GeneratedNoteDraft, MarkdownImportNoteDraft, Note } from '../types';
+import type { AppData, GeneratedNoteDraft, MarkdownImportNoteDraft, Note, SubjectKnowledgeMap } from '../types';
 
 export const emptyData: AppData = {
   schemaVersion: 3,
@@ -56,6 +56,75 @@ export function markdownDraftToNotes(draft: MarkdownImportNoteDraft): Note[] {
     position: index
   }));
   return [root, ...subNotes];
+}
+
+export function subjectKnowledgeMapToNotes(map: SubjectKnowledgeMap): Note[] {
+  const subject = map.subject || '综合学习';
+  const notes: Note[] = [];
+
+  if (map.overview?.trim()) {
+    notes.push(draftToNote({
+      title: map.title || `${subject} 知识地图`,
+      subject,
+      topic: '学科总览',
+      tags: normalizeList(map.tags),
+      summary: map.overview,
+      sections: [
+        {
+          heading: '总览',
+          content: map.overview
+        },
+        {
+          heading: '主题索引',
+          content: (map.topics || []).map((topic) => `- ${topic.title}: ${topic.summary || '核心主题'}`).join('\n')
+        }
+      ],
+      cases: [],
+      pitfalls: [],
+      interviewQuestions: [`请概括${subject}这套知识地图的核心结构。`]
+    }));
+  }
+
+  (map.topics || []).forEach((topic) => {
+    const topicTitle = topic.title || '未命名主题';
+    const topicNotes = topic.notes?.length
+      ? topic.notes
+      : [{
+          title: topicTitle,
+          subject,
+          topic: topicTitle,
+          tags: [],
+          summary: topic.summary || '',
+          sections: [{ heading: '核心内容', content: topic.summary || '' }],
+          cases: [],
+          pitfalls: [],
+          interviewQuestions: []
+        }];
+
+    topicNotes.forEach((draft, noteIndex) => {
+      const root = draftToNote({
+        ...draft,
+        subject,
+        topic: topicTitle
+      });
+      root.position = noteIndex;
+      notes.push(root);
+
+      (draft.subNotes || []).forEach((subDraft, subIndex) => {
+        notes.push({
+          ...draftToNote({
+            ...subDraft,
+            subject,
+            topic: topicTitle
+          }),
+          parentId: root.id,
+          position: subIndex
+        });
+      });
+    });
+  });
+
+  return notes;
 }
 
 export function normalizeList(values: unknown) {
