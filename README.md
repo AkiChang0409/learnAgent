@@ -107,7 +107,7 @@ OpenAI-compatible    https://api.openai.com/v1/chat/completions / gpt-4.1-mini
 
 如果导入的是项目开发文档，生成结果会重点提炼项目功能、亮点、技术重点、实现难点、对应解决方案和可复用经验，适合快速了解一个项目的技术方案。
 
-长 Markdown 会先由“知识抽取 Agent”按标题和长度分块提炼，再交给“知识整理 Agent”生成最终 `SubjectKnowledgeMap`，避免一个 Agent 同时承担阅读、抽取、编排、写作导致质量下降。模型不可用时会使用本地规则兜底，仍可生成基础结构。
+长 Markdown 会先由“知识抽取 Agent”按标题和长度分块提炼，再交给“知识整理 Agent”生成最终 `SubjectKnowledgeMap`，避免一个 Agent 同时承担阅读、抽取、编排、写作导致质量下降。导入过程中会显示读取、分块、抽取、整理和保存进度；模型不可用时会使用本地规则兜底，仍可生成基础结构。
 
 ## 本地数据
 

@@ -586,6 +586,114 @@ textarea {
   gap: 10px;
 }
 
+.import-progress {
+  width: min(900px, 100%);
+  margin: 0 auto 18px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid #cfc6b8;
+  border-radius: 8px;
+  background: #fffdf8;
+  box-shadow: 0 10px 26px rgba(71, 61, 42, 0.08);
+}
+
+.subject-home > .import-progress {
+  margin: -10px 0 22px;
+  width: 100%;
+}
+
+.import-progress.done {
+  border-color: #b7d8c8;
+  background: #f2faf5;
+}
+
+.import-progress.error {
+  border-color: #e4b2a7;
+  background: #fff7f4;
+}
+
+.import-progress-icon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #23615b;
+  background: #e2f1ed;
+}
+
+.import-progress.error .import-progress-icon {
+  color: #9c3d2e;
+  background: #f9e4df;
+}
+
+.import-progress-body {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.import-progress-row,
+.import-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.import-progress-row strong {
+  overflow: hidden;
+  color: #1f1d19;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-progress-row span,
+.import-progress-meta {
+  color: #70695f;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.import-progress-bar {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #ebe4d8;
+}
+
+.import-progress-bar span {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: #23615b;
+  transition: width 180ms ease;
+}
+
+.import-progress.done .import-progress-bar span {
+  background: #2d7d58;
+}
+
+.import-progress.error .import-progress-bar span {
+  background: #b44b3b;
+}
+
+.import-progress-meta {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.import-progress-meta span {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .voice-error {
   margin-right: auto;
 }

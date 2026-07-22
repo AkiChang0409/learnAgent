@@ -9,6 +9,11 @@ contextBridge.exposeInMainWorld('learnAgent', {
   importSyncPackage: () => ipcRenderer.invoke('sync:import-package'),
   generateNote: (payload) => ipcRenderer.invoke('ai:generate-note', payload),
   importMarkdown: (payload) => ipcRenderer.invoke('ai:import-markdown', payload),
+  onMarkdownImportProgress: (handler) => {
+    const listener = (_event, progress) => handler(progress);
+    ipcRenderer.on('ai:import-markdown-progress', listener);
+    return () => ipcRenderer.removeListener('ai:import-markdown-progress', listener);
+  },
   chatWithNote: (payload) => ipcRenderer.invoke('ai:chat-with-note', payload),
   summarizeConversation: (payload) => ipcRenderer.invoke('ai:summarize-conversation', payload),
   distillConversationToNote: (payload) => ipcRenderer.invoke('ai:distill-conversation-to-note', payload),

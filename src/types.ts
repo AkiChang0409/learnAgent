@@ -139,6 +139,30 @@ export interface MarkdownImportResult {
   usageRecord?: TokenUsageRecord | null;
 }
 
+export type MarkdownImportStage =
+  | 'idle'
+  | 'selecting-file'
+  | 'reading-file'
+  | 'chunking'
+  | 'extracting'
+  | 'organizing'
+  | 'normalizing'
+  | 'saving'
+  | 'done'
+  | 'fallback'
+  | 'error';
+
+export interface MarkdownImportProgress {
+  stage: MarkdownImportStage;
+  message: string;
+  fileName?: string;
+  current?: number;
+  total?: number;
+  percent?: number;
+  detail?: string;
+  updatedAt: string;
+}
+
 export interface RagSource {
   noteId: string;
   title: string;
@@ -224,6 +248,7 @@ export interface LearnAgentBridge {
   importSyncPackage: () => Promise<SyncImportResult>;
   generateNote: (payload: { input: string; settings: AiSettings }) => Promise<GeneratedNoteResult>;
   importMarkdown: (payload: { settings: AiSettings }) => Promise<MarkdownImportResult>;
+  onMarkdownImportProgress: (handler: (progress: MarkdownImportProgress) => void) => () => void;
   chatWithNote: (payload: {
     question: string;
     note: Note;

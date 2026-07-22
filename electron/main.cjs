@@ -290,6 +290,13 @@ async function runAgent(settings, agentId, userContent, operation, options = {})
   };
 }
 
+function sendMarkdownImportProgress(event, progress) {
+  event?.sender?.send('ai:import-markdown-progress', {
+    ...progress,
+    updatedAt: new Date().toISOString()
+  });
+}
+
 function extractJson(text) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const source = fenced ? fenced[1] : text;
@@ -397,7 +404,7 @@ function chunkMarkdown(markdown, maxChars = 9000) {
   });
 }
 
-async function buildMarkdownImportContent(settings, fileName, headings, chunks) {
+async function buildMarkdownImportContent(settings, fileName, headings, chunks, onProgress = () => {}) {
   const headingText = headings.map((heading) => `${'#'.repeat(heading.level)} ${heading.title}`).join('\n') || '无明显标题';
   const batches = chunks.length <= 4
     ? [{
@@ -412,6 +419,15 @@ async function buildMarkdownImportContent(settings, fileName, headings, chunks) 
   const usageRecords = [];
 
   for (const [index, batch] of batches.entries()) {
+    onProgress({
+      stage: 'extracting',
+      message: batches.length === 1 ? '正在抽取文档知识点' : `正在抽取第 ${index + 1}/${batches.length} 批知识点`,
+      fileName,
+      current: index + 1,
+      total: batches.length,
+      percent: Math.round(((index + 1) / Math.max(batches.length, 1)) * 65),
+      detail: batch.label
+    });
     const result = await runAgent(
       settings,
       'markdown.knowledge-extractor',
@@ -431,6 +447,15 @@ async function buildMarkdownImportContent(settings, fileName, headings, chunks) 
     });
     if (result.usageRecord) usageRecords.push(result.usageRecord);
   }
+
+  onProgress({
+    stage: 'organizing',
+    message: '知识点抽取完成，正在整理学科结构',
+    fileName,
+    current: batches.length,
+    total: batches.length,
+    percent: 72
+  });
 
   return {
     content: JSON.stringify({
@@ -996,6 +1021,11 @@ ipcMain.handle('ai:generate-note', async (_event, payload) => {
 
 ipcMain.handle('ai:import-markdown', async (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
+  sendMarkdownImportProgress(event, {
+    stage: 'selecting-file',
+    message: '请选择要导入的 Markdown 文档',
+    percent: 2
+  });
   const result = await dialog.showOpenDialog(win, {
     title: '选择 Markdown 文档',
     properties: ['openFile'],
@@ -1011,12 +1041,40 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
   const filePath = result.filePaths[0];
   const fileName = path.basename(filePath);
   const settings = payload?.settings || {};
+  sendMarkdownImportProgress(event, {
+    stage: 'reading-file',
+    message: '正在读取 Markdown 文档',
+    fileName,
+    percent: 8
+  });
   const markdown = await fs.readFile(filePath, 'utf8');
+  sendMarkdownImportProgress(event, {
+    stage: 'chunking',
+    message: '正在按标题和长度切分文档',
+    fileName,
+    percent: 14
+  });
   const chunks = chunkMarkdown(markdown);
   const headings = extractMarkdownHeadings(markdown);
+  sendMarkdownImportProgress(event, {
+    stage: 'chunking',
+    message: `已切分为 ${chunks.length} 个文档块`,
+    fileName,
+    current: chunks.length,
+    total: chunks.length,
+    percent: 18
+  });
 
   try {
-    const importContent = await buildMarkdownImportContent(settings, fileName, headings, chunks);
+    const importContent = await buildMarkdownImportContent(settings, fileName, headings, chunks, (progress) => {
+      sendMarkdownImportProgress(event, progress);
+    });
+    sendMarkdownImportProgress(event, {
+      stage: 'organizing',
+      message: '正在生成多主题知识地图',
+      fileName,
+      percent: 78
+    });
     const organizerResult = await runAgent(
       settings,
       'knowledge.organizer',
@@ -1024,15 +1082,30 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
       'import-markdown',
       { json: true }
     );
+    sendMarkdownImportProgress(event, {
+      stage: 'normalizing',
+      message: '正在校正知识地图结构',
+      fileName,
+      percent: 90
+    });
     const usageRecord = aggregateUsageRecords(
       [...importContent.usageRecords, organizerResult.usageRecord],
       settings,
       'import-markdown'
     ) || organizerResult.usageRecord;
+    const knowledgeMap = normalizeSubjectKnowledgeMap(organizerResult.json, fileName, markdown);
+    sendMarkdownImportProgress(event, {
+      stage: 'done',
+      message: `已生成 ${knowledgeMap.topics?.length || 0} 个主题的知识地图`,
+      fileName,
+      current: knowledgeMap.topics?.length || 0,
+      total: knowledgeMap.topics?.length || 0,
+      percent: 100
+    });
     return {
       filePath,
       fileName,
-      knowledgeMap: normalizeSubjectKnowledgeMap(organizerResult.json, fileName, markdown),
+      knowledgeMap,
       usedFallback: false,
       message: '已从 Markdown 生成知识地图',
       usageRecord
@@ -1044,10 +1117,25 @@ ipcMain.handle('ai:import-markdown', async (event, payload) => {
     if (error?.message !== 'LOCAL_PROVIDER') {
       console.warn('Falling back to local Markdown import:', error);
     }
+    sendMarkdownImportProgress(event, {
+      stage: 'fallback',
+      message,
+      fileName,
+      percent: 84
+    });
+    const knowledgeMap = localMarkdownKnowledgeMap(fileName, markdown);
+    sendMarkdownImportProgress(event, {
+      stage: 'done',
+      message: `已使用本地规则生成 ${knowledgeMap.topics?.length || 0} 个主题`,
+      fileName,
+      current: knowledgeMap.topics?.length || 0,
+      total: knowledgeMap.topics?.length || 0,
+      percent: 100
+    });
     return {
       filePath,
       fileName,
-      knowledgeMap: localMarkdownKnowledgeMap(fileName, markdown),
+      knowledgeMap,
       usedFallback: true,
       message
     };

@@ -11,14 +11,16 @@ import type {
 } from './types';
 import { ChatPanel } from './components/ChatPanel';
 import { ComposerPanel } from './components/ComposerPanel';
+import { ImportProgressPanel } from './components/ImportProgressPanel';
 import { NoteEditor, type ListField } from './components/NoteEditor';
 import { SettingsModal } from './components/SettingsModal';
 import { Sidebar } from './components/Sidebar';
 import { ToastHost, type ToastMessage } from './components/ToastHost';
 import { useAppData } from './hooks/useAppData';
 import { useAutosave } from './hooks/useAutosave';
+import { useKnowledgeImport } from './hooks/useKnowledgeImport';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
-import { createId, draftToNote, formatDate, markdownDraftToNotes, nowIso, subjectKnowledgeMapToNotes } from './services/notes';
+import { createId, draftToNote, formatDate, nowIso } from './services/notes';
 import { retrieveContext } from './services/rag';
 
 function errorMessage(error: unknown) {
@@ -47,7 +49,6 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<Note[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isImportingMarkdown, setIsImportingMarkdown] = useState(false);
   const [isAsking, setIsAsking] = useState(false);
   const [isDistilling, setIsDistilling] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
@@ -157,6 +158,16 @@ export default function App() {
     if (!query) return selectedSubjectNotes;
     return searchResults.filter((note) => (note.subject.trim() || '通用学习') === selectedSubject);
   }, [noteSearch, searchResults, selectedSubject, selectedSubjectNotes]);
+
+  const { importMarkdown, isImportingMarkdown, importProgress } = useKnowledgeImport({
+    data,
+    setData,
+    selectedSubject,
+    isGenerating,
+    setSelectedSubject,
+    setSelectedNoteId,
+    pushToast
+  });
 
   function appendUsageRecord(record?: TokenUsageRecord | null) {
     if (!record) return;
@@ -269,89 +280,6 @@ export default function App() {
       pushToast('error', `生成失败：${errorMessage(error)}`);
     } finally {
       setIsGenerating(false);
-    }
-  }
-
-  async function importMarkdown() {
-    if (isImportingMarkdown || isGenerating) return;
-    setIsImportingMarkdown(true);
-    try {
-      const result = await window.learnAgent.importMarkdown({ settings: data.settings });
-      if (result.canceled) return;
-      if (!result.knowledgeMap && !result.root) {
-        pushToast('error', '导入失败：未生成有效笔记结构');
-        return;
-      }
-
-      const importedNotes = result.knowledgeMap
-        ? subjectKnowledgeMapToNotes(result.knowledgeMap)
-        : result.root
-          ? markdownDraftToNotes(result.root)
-          : [];
-      const firstNote = importedNotes[0];
-      if (!firstNote) {
-        pushToast('error', '导入失败：Markdown 内容为空或无法整理');
-        return;
-      }
-
-      const subject = result.knowledgeMap?.subject || firstNote.subject || selectedSubject || '通用学习';
-      const now = nowIso();
-      const stampedNotes = importedNotes.map((note) => ({
-        ...note,
-        subject: note.subject || subject,
-        topic: note.topic || note.title || '未命名主题',
-        updatedAt: now
-      }));
-      const conversations: Conversation[] = stampedNotes.map((note) => ({
-        id: createId('conversation'),
-        noteId: note.id,
-        title: note.title,
-        messages: [],
-        updatedAt: now
-      }));
-
-      setData((current) => {
-        const rootPositionByGroup = new Map<string, number>();
-        const positionedNotes = stampedNotes.map((note) => {
-          if (note.parentId) {
-            return {
-              ...note,
-              position: note.position ?? 0
-            };
-          }
-          const key = `${note.subject || subject}\u0000${note.topic || '未命名主题'}`;
-          const position = rootPositionByGroup.get(key)
-            ?? rootNotePosition(current.notes, note.subject || subject, note.topic || '未命名主题');
-          rootPositionByGroup.set(key, position + 1);
-          return {
-            ...note,
-            parentId: undefined,
-            position
-          };
-        });
-
-        return {
-          ...current,
-          notes: [
-            ...positionedNotes,
-            ...current.notes
-          ],
-          conversations: [...conversations, ...current.conversations],
-          usageRecords: result.usageRecord
-            ? [...(current.usageRecords || []), result.usageRecord].slice(-1000)
-            : current.usageRecords
-        };
-      });
-      setSelectedSubject(subject);
-      setSelectedNoteId(firstNote.id);
-      pushToast(
-        result.usedFallback ? 'info' : 'success',
-        `${result.message || '已从 Markdown 生成知识地图'}：${stampedNotes.length} 篇笔记`
-      );
-    } catch (error) {
-      pushToast('error', `导入 Markdown 失败：${errorMessage(error)}`);
-    } finally {
-      setIsImportingMarkdown(false);
     }
   }
 
@@ -873,6 +801,7 @@ export default function App() {
             </button>
           </div>
         </header>
+        <ImportProgressPanel progress={importProgress} />
 
         {subjectSummaries.length ? (
           <section className="subject-card-grid" aria-label="学科列表">
@@ -961,6 +890,7 @@ export default function App() {
           onImportMarkdown={importMarkdown}
           onToggleListening={toggleListening}
         />
+        <ImportProgressPanel progress={importProgress} />
 
         <NoteEditor
           note={selectedNote}
