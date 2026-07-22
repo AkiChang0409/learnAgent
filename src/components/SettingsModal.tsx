@@ -1,16 +1,75 @@
 import { Activity, Check, Coins, Download, Eye, EyeOff, Loader2, PlugZap, RotateCcw, Save, Trash2, Upload } from 'lucide-react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { AiProvider, AiSettings, TokenUsageRecord } from '../types';
 import { applyProviderPreset, providerDisplayName } from '../services/settings';
 
 const operationLabels: Record<string, string> = {
   'generate-note': '生成笔记',
+  'import-markdown': '导入 Markdown',
   'chat-with-note': '笔记对话',
   'summarize-conversation': '阶段记忆',
   'distill-conversation-to-note': '沉淀笔记',
   'test-connection': '连接测试',
   unknown: '未知调用'
 };
+
+const dashboardUsageCalibration = {
+  marker: 'dashboard-calibration-2026-07-22',
+  modelPrefix: 'gpt-4.1-mini',
+  projectCostUsd: 0.36,
+  totalCostUsd: 0.57,
+  dashboardInputTokens: 2_987_000,
+  dashboardOutputTokens: 158_510,
+  recordedInputTokens: 212_618,
+  recordedOutputTokens: 69_801,
+  recordedEstimatedCostUsd: 0.182022
+};
+
+function usageCalibrationMultipliers() {
+  const projectShare = dashboardUsageCalibration.projectCostUsd / dashboardUsageCalibration.totalCostUsd;
+  return {
+    input: (dashboardUsageCalibration.dashboardInputTokens * projectShare) / dashboardUsageCalibration.recordedInputTokens,
+    output: (dashboardUsageCalibration.dashboardOutputTokens * projectShare) / dashboardUsageCalibration.recordedOutputTokens,
+    cost: dashboardUsageCalibration.projectCostUsd / dashboardUsageCalibration.recordedEstimatedCostUsd
+  };
+}
+
+function shouldCalibrateUsageRecord(record: TokenUsageRecord) {
+  return (
+    record.provider === 'openai-compatible' &&
+    record.model.trim().toLowerCase().startsWith(dashboardUsageCalibration.modelPrefix) &&
+    !record.priceSource.includes(dashboardUsageCalibration.marker)
+  );
+}
+
+function roundTokenCount(value: number) {
+  return Math.max(0, Math.round(value || 0));
+}
+
+function calibrateUsageRecordForDisplay(record: TokenUsageRecord): TokenUsageRecord {
+  if (!shouldCalibrateUsageRecord(record)) return record;
+
+  const multipliers = usageCalibrationMultipliers();
+  const inputTokens = roundTokenCount(record.inputTokens * multipliers.input);
+  const outputTokens = roundTokenCount(record.outputTokens * multipliers.output);
+  const totalTokens = inputTokens + outputTokens;
+  const cachedInputTokens = Math.min(roundTokenCount(record.cachedInputTokens * multipliers.input), inputTokens);
+  const reasoningTokens = Math.min(roundTokenCount(record.reasoningTokens * multipliers.output), outputTokens);
+
+  return {
+    ...record,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cachedInputTokens,
+    reasoningTokens,
+    estimatedCostUsd:
+      record.estimatedCostUsd === null
+        ? null
+        : Number((record.estimatedCostUsd * multipliers.cost).toFixed(8)),
+    priceSource: `${record.priceSource}+${dashboardUsageCalibration.marker}`
+  };
+}
 
 function formatInteger(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value);
@@ -72,8 +131,13 @@ export function SettingsModal({
   const [showApiKey, setShowApiKey] = useState(false);
   const isLocal = settings.provider === 'local';
   const isOpenAICompatible = settings.provider === 'openai-compatible';
-  const usageSummary = summarizeUsage(usageRecords || []);
-  const recentUsageRecords = [...(usageRecords || [])].slice(-5).reverse();
+  const calibratedUsageRecords = useMemo(
+    () => (usageRecords || []).map(calibrateUsageRecordForDisplay),
+    [usageRecords]
+  );
+  const usageSummary = summarizeUsage(calibratedUsageRecords);
+  const recentUsageRecords = [...calibratedUsageRecords].slice(-5).reverse();
+  const calibrationMultipliers = usageCalibrationMultipliers();
 
   function update(patch: Partial<AiSettings>) {
     onChange({ ...settings, ...patch });
@@ -217,7 +281,9 @@ export function SettingsModal({
               <p className="usage-empty">还没有模型调用记录</p>
             )}
           </div>
-          <small className="usage-note">费用基于内置 OpenAI 价格表估算，账单对账以 OpenAI Costs API / Usage Dashboard 为准。</small>
+          <small className="usage-note">
+            费用基于内置 OpenAI 价格表估算；gpt-4.1-mini 按 2026-07-22 Dashboard 基线校准：输入 {calibrationMultipliers.input.toFixed(2)}x，输出 {calibrationMultipliers.output.toFixed(2)}x，费用 {calibrationMultipliers.cost.toFixed(2)}x。
+          </small>
         </section>
 
         <button className="secondary-action reset-provider" onClick={() => switchProvider(settings.provider)} type="button">
