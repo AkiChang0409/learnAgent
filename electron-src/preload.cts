@@ -1,14 +1,21 @@
+// The preload remains a narrow, typed-build capability bridge with no Node API exposure.
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('learnAgent', {
-  loadData: () => ipcRenderer.invoke('data:load'),
-  saveData: (data) => ipcRenderer.invoke('data:save', data),
+  getAppInfo: () => ipcRenderer.invoke('app:info'),
+  loadSnapshot: () => ipcRenderer.invoke('data:load-snapshot'),
+  applyChanges: (payload) => ipcRenderer.invoke('data:apply-changes', payload),
+  flushData: () => ipcRenderer.invoke('data:flush'),
+  setApiKey: (value) => ipcRenderer.invoke('settings:set-api-key', value),
+  clearApiKey: () => ipcRenderer.invoke('settings:clear-api-key'),
   searchNotes: (query) => ipcRenderer.invoke('data:search-notes', query),
   retrieveContext: (payload) => ipcRenderer.invoke('data:retrieve-context', payload),
   exportSyncPackage: () => ipcRenderer.invoke('sync:export-package'),
   importSyncPackage: () => ipcRenderer.invoke('sync:import-package'),
   generateNote: (payload) => ipcRenderer.invoke('ai:generate-note', payload),
-  importMarkdown: (payload) => ipcRenderer.invoke('ai:import-markdown', payload),
+  selectMarkdownSource: () => ipcRenderer.invoke('ai:select-markdown-source'),
+  startMarkdownImport: (payload) => ipcRenderer.invoke('ai:start-markdown-import', payload),
+  cancelMarkdownImport: (payload) => ipcRenderer.invoke('ai:cancel-markdown-import', payload),
   onMarkdownImportProgress: (handler) => {
     const listener = (_event, progress) => handler(progress);
     ipcRenderer.on('ai:import-markdown-progress', listener);

@@ -12,7 +12,6 @@ export const emptyData: AppData = {
     provider: 'local',
     endpoint: 'https://api.openai.com/v1/chat/completions',
     model: 'gpt-4.1-mini',
-    apiKey: '',
     lastTestStatus: 'idle',
     lastTestMessage: '尚未测试连接'
   }
@@ -45,6 +44,7 @@ export function ensureSubjects(data: Pick<AppData, 'subjects' | 'notes'>): Subje
       id: subject.id || createId('subject'),
       name,
       description: subject.description || '',
+      topics: Array.isArray(subject.topics) ? subject.topics : [],
       createdAt: subject.createdAt || now,
       updatedAt: subject.updatedAt || subject.createdAt || now
     });
@@ -58,6 +58,7 @@ export function ensureSubjects(data: Pick<AppData, 'subjects' | 'notes'>): Subje
       id: createId('subject'),
       name,
       description: '',
+      topics: [],
       createdAt: note.createdAt || now,
       updatedAt: note.updatedAt || note.createdAt || now
     });

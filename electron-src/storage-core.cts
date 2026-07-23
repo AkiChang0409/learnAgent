@@ -1,9 +1,10 @@
+// Electron storage is compiled from TypeScript CommonJS to keep sql.js packaging predictable.
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const initSqlJs = require('sql.js');
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 6;
 const DEFAULT_SUBJECT_NAME = '通用学习';
 
 function defaultData() {
@@ -17,7 +18,6 @@ function defaultData() {
       provider: 'local',
       endpoint: 'https://api.openai.com/v1/chat/completions',
       model: 'gpt-4.1-mini',
-      apiKey: '',
       lastTestStatus: 'idle',
       lastTestMessage: '尚未测试连接'
     }
@@ -26,23 +26,48 @@ function defaultData() {
 
 function createStorage(userDataPath) {
   const dbPath = path.join(userDataPath, 'learn-agent.sqlite');
+  const backupPath = path.join(userDataPath, 'learn-agent.sqlite.backup');
+  const journalPath = path.join(userDataPath, 'learn-agent.journal.json');
+  const previousJournalPath = path.join(userDataPath, 'learn-agent.journal.previous.json');
   const legacyJsonPath = path.join(userDataPath, 'learn-agent-data.json');
   let SQL = null;
   let db = null;
+  let revision = 0;
+  let checkpointedRevision = 0;
+  let latestSnapshot = null;
+  let checkpointQueue = Promise.resolve();
+  let journalQueue = Promise.resolve();
+  let checkpointScheduled = false;
+  let chunkCache = null;
+  let persistQueue = Promise.resolve();
 
   async function init() {
     if (db) return;
     SQL = await initSqlJs();
     await fs.mkdir(userDataPath, { recursive: true });
+    let loadedPrimary = false;
     try {
       const fileBuffer = await fs.readFile(dbPath);
       db = new SQL.Database(fileBuffer);
+      loadedPrimary = true;
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error;
-      db = new SQL.Database();
+      try {
+        db = new SQL.Database(await fs.readFile(backupPath));
+      } catch (backupError) {
+        if (backupError?.code !== 'ENOENT') throw backupError;
+        db = new SQL.Database();
+      }
+    }
+    const previousSchemaVersion = existingSchemaVersion();
+    if (loadedPrimary && previousSchemaVersion > 0 && previousSchemaVersion < SCHEMA_VERSION) {
+      await fs.copyFile(dbPath, `${dbPath}.pre-v${previousSchemaVersion}-migration.backup`);
     }
     applySchema();
     await migrateLegacyJsonIfNeeded();
+    revision = Number(singleValue("SELECT value FROM metadata WHERE key = 'revision'", 'value')) || 0;
+    await replayJournal();
+    checkpointedRevision = revision;
     await persist();
   }
 
@@ -131,24 +156,31 @@ function createStorage(userDataPath) {
       );
 
       INSERT OR IGNORE INTO metadata (key, value) VALUES ('schemaVersion', '${SCHEMA_VERSION}');
+      INSERT OR IGNORE INTO metadata (key, value) VALUES ('revision', '0');
       UPDATE metadata SET value = '${SCHEMA_VERSION}' WHERE key = 'schemaVersion';
       INSERT OR IGNORE INTO settings (id, data) VALUES (1, '${escapeSql(JSON.stringify(defaultData().settings))}');
     `);
 
+    ensureColumn('subjects', 'topics', "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn('conversations', 'memory_summary', "TEXT NOT NULL DEFAULT ''");
     ensureColumn('conversations', 'memory_updated_at', 'TEXT');
     ensureColumn('conversations', 'summarized_message_count', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn('notes', 'parent_note_id', 'TEXT');
     ensureColumn('notes', 'position', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn('usage_records', 'base_estimated_cost_usd', 'REAL');
+    ensureColumn('usage_records', 'calibration_multiplier', 'REAL NOT NULL DEFAULT 1');
+    ensureColumn('usage_records', 'final_estimated_cost_usd', 'REAL');
+    ensureColumn('usage_records', 'pricing_version', "TEXT NOT NULL DEFAULT ''");
+    ensureColumn('usage_records', 'token_accounting_version', "TEXT NOT NULL DEFAULT 'provider-reported-v2'");
+    db.run(`
+      UPDATE usage_records
+      SET token_accounting_version = 'legacy-dashboard-calibrated-v1'
+      WHERE price_source LIKE '%dashboard-calibration-2026-07-22%'
+    `);
     db.run(`UPDATE metadata SET value = '${SCHEMA_VERSION}' WHERE key = 'schemaVersion'`);
+    db.run("INSERT OR REPLACE INTO metadata (key, value) VALUES ('migration_v5', 'topics-and-usage-accounting')");
 
     db.run(`
-      CREATE TABLE IF NOT EXISTS note_search (
-        note_id TEXT PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
-        content_text TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
       CREATE TABLE IF NOT EXISTS note_chunks (
         id TEXT PRIMARY KEY,
         note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
@@ -163,7 +195,37 @@ function createStorage(userDataPath) {
 
       CREATE INDEX IF NOT EXISTS idx_note_chunks_note_id ON note_chunks(note_id);
       CREATE INDEX IF NOT EXISTS idx_note_chunks_updated_at ON note_chunks(updated_at);
+
+      CREATE TABLE IF NOT EXISTS agent_runs (
+        id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        source_name TEXT NOT NULL,
+        estimated_calls INTEGER NOT NULL DEFAULT 0,
+        actual_calls INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_steps (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        agent_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 1,
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_agent_steps_run_id ON agent_steps(run_id);
+      INSERT OR REPLACE INTO metadata (key, value) VALUES ('migration_v6', 'revision-agent-recovery');
+      DROP TABLE IF EXISTS note_search;
+      UPDATE agent_runs SET status = 'interrupted', updated_at = datetime('now') WHERE status = 'running';
     `);
+    ensureColumn('agent_steps', 'input_summary', "TEXT NOT NULL DEFAULT ''");
+    ensureColumn('agent_steps', 'output_summary', "TEXT NOT NULL DEFAULT ''");
+    ensureColumn('agent_steps', 'usage_record_id', "TEXT NOT NULL DEFAULT ''");
     rebuildIndexes();
   }
 
@@ -189,7 +251,11 @@ function createStorage(userDataPath) {
 
   async function loadData() {
     await init();
-    return loadDataSync();
+    return latestSnapshot || loadDataSync();
+  }
+
+  async function loadSnapshot() {
+    return { data: await loadData(), revision };
   }
 
   function loadDataSync(noteIds = null) {
@@ -203,10 +269,197 @@ function createStorage(userDataPath) {
   }
 
   async function saveData(data) {
+    const result = await applyChanges({ baseRevision: revision, changes: { snapshot: data } });
+    return { ok: true, filePath: dbPath, ...result };
+  }
+
+  async function applyChanges(payload) {
     await init();
-    saveDataSync(data);
+    if (!payload || Number(payload.baseRevision) !== revision) {
+      const error: any = new Error(`数据版本冲突：期望 ${revision}`);
+      error.code = 'REVISION_CONFLICT';
+      error.revision = revision;
+      throw error;
+    }
+    const current = latestSnapshot || loadDataSync();
+    const next = payload.changes?.snapshot
+      ? payload.changes.snapshot
+      : applyChangeBatch(current, payload.changes || {});
+    validateAppData(next);
+    const baseRevision = revision;
+    revision += 1;
+    latestSnapshot = next;
+    await appendJournal({ revision, baseRevision, changes: payload.changes || {} });
+    applyChangesToDb(payload.changes || {}, next);
+    scheduleCheckpoint();
+    return { revision, durable: true };
+  }
+
+  async function flushData() {
+    await init();
+    while (checkpointedRevision < revision) {
+      scheduleCheckpoint();
+      const pendingCheckpoint = checkpointQueue;
+      await pendingCheckpoint;
+    }
+    await compactJournal(checkpointedRevision);
+    return { revision, durable: true };
+  }
+
+  async function recordAgentRun(run) {
+    await init();
+    db.run(`
+      INSERT OR REPLACE INTO agent_runs (
+        id, mode, status, source_name, estimated_calls, actual_calls, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `, [run.id, run.mode || 'fast', run.status || 'running', run.sourceName || '', Number(run.estimatedCalls || 0), Number(run.actualCalls || 0), run.createdAt, run.updatedAt]);
     await persist();
-    return { ok: true, filePath: dbPath };
+  }
+
+  function existingSchemaVersion() {
+    try {
+      return Number(singleValue("SELECT value FROM metadata WHERE key = 'schemaVersion'", 'value')) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  async function recordAgentStep(step) {
+    await init();
+    db.run(`
+      INSERT OR REPLACE INTO agent_steps (
+        id, run_id, agent_id, status, attempt, error, created_at, updated_at,
+        input_summary, output_summary, usage_record_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [step.id, step.runId, step.agentId, step.status, Number(step.attempt || 1), step.errorMessage || '',
+      step.createdAt, step.updatedAt, step.inputSummary || '', step.outputSummary || '', step.usageRecordId || '']);
+    await persist();
+  }
+
+  async function applyChangesVolatile(payload) {
+    await init();
+    if (!payload || Number(payload.baseRevision) !== revision) {
+      const error: any = new Error(`数据版本冲突：期望 ${revision}`);
+      error.code = 'REVISION_CONFLICT';
+      error.revision = revision;
+      throw error;
+    }
+    const current = latestSnapshot || loadDataSync();
+    const next = payload.changes?.snapshot
+      ? payload.changes.snapshot
+      : applyChangeBatch(current, payload.changes || {});
+    validateAppData(next);
+    revision = Number(payload.revision);
+    latestSnapshot = next;
+    applyChangesToDb(payload.changes || {}, next);
+    scheduleCheckpoint();
+    return { revision, durable: false };
+  }
+
+  function applyChangesToDb(changes, snapshot) {
+    if (changes?.snapshot) {
+      saveDataSync(snapshot);
+      return;
+    }
+    const entities = (change) => ({
+      upsert: Array.isArray(change?.upsert) ? change.upsert : [],
+      deleteIds: Array.isArray(change?.deleteIds) ? change.deleteIds : []
+    });
+    const subjects = entities(changes.subjects);
+    const notes = entities(changes.notes);
+    const conversations = entities(changes.conversations);
+    const usageRecords = entities(changes.usageRecords);
+    db.run('BEGIN TRANSACTION');
+    try {
+      if (changes.settings) {
+        db.run('UPDATE settings SET data = ? WHERE id = 1', [JSON.stringify({
+          ...defaultData().settings,
+          ...sanitizeSettings(snapshot.settings)
+        })]);
+      }
+      for (const id of conversations.deleteIds) {
+        db.run('DELETE FROM messages WHERE conversation_id = ?', [id]);
+        db.run('DELETE FROM conversations WHERE id = ?', [id]);
+      }
+      for (const id of notes.deleteIds) {
+        const conversationIds = queryRows('SELECT id FROM conversations WHERE note_id = ?', [id]).map((row) => row.id);
+        for (const conversationId of conversationIds) db.run('DELETE FROM messages WHERE conversation_id = ?', [conversationId]);
+        db.run('DELETE FROM conversations WHERE note_id = ?', [id]);
+        db.run('DELETE FROM note_sections WHERE note_id = ?', [id]);
+        db.run('DELETE FROM note_chunks WHERE note_id = ?', [id]);
+        db.run('DELETE FROM notes WHERE id = ?', [id]);
+      }
+      for (const id of subjects.deleteIds) db.run('DELETE FROM subjects WHERE id = ?', [id]);
+      for (const id of usageRecords.deleteIds) db.run('DELETE FROM usage_records WHERE id = ?', [id]);
+
+      for (const subject of subjects.upsert) {
+        db.run(`INSERT INTO subjects (id, name, description, topics, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,
+          topics=excluded.topics, created_at=excluded.created_at, updated_at=excluded.updated_at`, [
+          subject.id, subject.name, subject.description || '', JSON.stringify(subject.topics || []),
+          subject.createdAt, subject.updatedAt
+        ]);
+      }
+      for (const note of notes.upsert) {
+        db.run(`INSERT INTO notes (id, parent_note_id, position, title, subject, topic, tags, summary,
+          cases_json, pitfalls_json, interview_questions_json, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET parent_note_id=excluded.parent_note_id, position=excluded.position,
+          title=excluded.title, subject=excluded.subject, topic=excluded.topic, tags=excluded.tags,
+          summary=excluded.summary, cases_json=excluded.cases_json, pitfalls_json=excluded.pitfalls_json,
+          interview_questions_json=excluded.interview_questions_json, created_at=excluded.created_at,
+          updated_at=excluded.updated_at`, [
+          note.id, note.parentId || null, Number(note.position || 0), note.title, note.subject, note.topic,
+          JSON.stringify(note.tags || []), note.summary || '', JSON.stringify(note.cases || []),
+          JSON.stringify(note.pitfalls || []), JSON.stringify(note.interviewQuestions || []), note.createdAt, note.updatedAt
+        ]);
+        db.run('DELETE FROM note_sections WHERE note_id = ?', [note.id]);
+        (note.sections || []).forEach((section, index) => db.run(
+          'INSERT INTO note_sections (id, note_id, heading, content, position) VALUES (?, ?, ?, ?, ?)',
+          [section.id, note.id, section.heading, section.content || '', index]
+        ));
+        replaceNoteChunks(note);
+      }
+      for (const conversation of conversations.upsert) {
+        db.run(`INSERT INTO conversations (id, note_id, title, memory_summary, memory_updated_at,
+          summarized_message_count, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET note_id=excluded.note_id, title=excluded.title,
+          memory_summary=excluded.memory_summary, memory_updated_at=excluded.memory_updated_at,
+          summarized_message_count=excluded.summarized_message_count, updated_at=excluded.updated_at`, [
+          conversation.id, conversation.noteId, conversation.title, conversation.memorySummary || '',
+          conversation.memoryUpdatedAt || null, Number(conversation.summarizedMessageCount || 0), conversation.updatedAt
+        ]);
+        db.run('DELETE FROM messages WHERE conversation_id = ?', [conversation.id]);
+        (conversation.messages || []).forEach((message, index) => db.run(
+          'INSERT INTO messages (id, conversation_id, role, content, created_at, sources_json, position) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [message.id, conversation.id, message.role, message.content, message.createdAt, JSON.stringify(message.sources || []), index]
+        ));
+      }
+      for (const record of usageRecords.upsert) {
+        db.run(`INSERT OR REPLACE INTO usage_records (id, created_at, operation, provider, endpoint, model,
+          input_tokens, output_tokens, total_tokens, cached_input_tokens, reasoning_tokens, estimated_cost_usd,
+          currency, price_source, response_id, base_estimated_cost_usd, calibration_multiplier,
+          final_estimated_cost_usd, pricing_version, token_accounting_version)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+          record.id, record.createdAt, record.operation || 'unknown', record.provider || '', record.endpoint || '',
+          record.model || '', Number(record.inputTokens || 0), Number(record.outputTokens || 0),
+          Number(record.totalTokens || 0), Number(record.cachedInputTokens || 0), Number(record.reasoningTokens || 0),
+          typeof record.estimatedCostUsd === 'number' ? record.estimatedCostUsd : null, record.currency || 'usd',
+          record.priceSource || 'unknown', record.responseId || '',
+          typeof record.baseEstimatedCostUsd === 'number' ? record.baseEstimatedCostUsd : null,
+          Number(record.calibrationMultiplier || 1),
+          typeof record.finalEstimatedCostUsd === 'number' ? record.finalEstimatedCostUsd : record.estimatedCostUsd ?? null,
+          record.pricingVersion || '', record.tokenAccountingVersion || 'provider-reported-v2'
+        ]);
+      }
+      db.run("UPDATE metadata SET value = ? WHERE key = 'revision'", [String(revision)]);
+      db.run('COMMIT');
+      chunkCache = null;
+    } catch (error) {
+      db.run('ROLLBACK');
+      throw error;
+    }
   }
 
   function saveDataSync(data) {
@@ -214,7 +467,7 @@ function createStorage(userDataPath) {
       ...defaultData(),
       ...data,
       subjects: normalizeSubjects(data),
-      settings: { ...defaultData().settings, ...data?.settings }
+      settings: sanitizeSettings({ ...defaultData().settings, ...data?.settings })
     };
     db.run('BEGIN TRANSACTION');
     try {
@@ -227,8 +480,8 @@ function createStorage(userDataPath) {
       db.run('UPDATE settings SET data = ? WHERE id = 1', [JSON.stringify(merged.settings)]);
 
       const insertSubject = db.prepare(`
-        INSERT INTO subjects (id, name, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO subjects (id, name, description, topics, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
       const insertNote = db.prepare(`
         INSERT INTO notes (
@@ -253,8 +506,9 @@ function createStorage(userDataPath) {
         INSERT INTO usage_records (
           id, created_at, operation, provider, endpoint, model, input_tokens, output_tokens,
           total_tokens, cached_input_tokens, reasoning_tokens, estimated_cost_usd, currency,
-          price_source, response_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          price_source, response_id, base_estimated_cost_usd, calibration_multiplier,
+          final_estimated_cost_usd, pricing_version, token_accounting_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       for (const subject of merged.subjects || []) {
@@ -262,6 +516,7 @@ function createStorage(userDataPath) {
           subject.id,
           subject.name,
           subject.description || '',
+          JSON.stringify(Array.isArray(subject.topics) ? subject.topics : []),
           subject.createdAt,
           subject.updatedAt
         ]);
@@ -327,7 +582,16 @@ function createStorage(userDataPath) {
           typeof record.estimatedCostUsd === 'number' ? record.estimatedCostUsd : null,
           record.currency || 'usd',
           record.priceSource || 'unknown',
-          record.responseId || ''
+          record.responseId || '',
+          typeof record.baseEstimatedCostUsd === 'number' ? record.baseEstimatedCostUsd : null,
+          Number(record.calibrationMultiplier || 1),
+          typeof record.finalEstimatedCostUsd === 'number'
+            ? record.finalEstimatedCostUsd
+            : (typeof record.estimatedCostUsd === 'number' ? record.estimatedCostUsd : null),
+          record.pricingVersion || '',
+          record.tokenAccountingVersion || (String(record.priceSource || '').includes('dashboard-calibration-2026-07-22')
+            ? 'legacy-dashboard-calibrated-v1'
+            : 'provider-reported-v2')
         ]);
       }
 
@@ -338,6 +602,7 @@ function createStorage(userDataPath) {
       insertMessage.free();
       insertUsageRecord.free();
       rebuildIndexes();
+      chunkCache = null;
       db.run('COMMIT');
     } catch (error) {
       db.run('ROLLBACK');
@@ -351,7 +616,10 @@ function createStorage(userDataPath) {
     if (!cleanQuery) return loadDataSync().notes;
 
     const queryTerms = terms(cleanQuery);
-    const chunkRows = readChunkRows();
+    const chunkRows = chunkCache || (chunkCache = readChunkRows().map((chunk) => ({
+      ...chunk,
+      normalizedText: normalize(`${chunk.title || ''} ${chunk.section || ''} ${chunk.contentText || ''}`)
+    })));
     const ranked = rankChunks(queryTerms, chunkRows, { limit: 240 })
       .filter((chunk) => chunk.score > 0);
     const byNote = new Map();
@@ -434,6 +702,7 @@ function createStorage(userDataPath) {
         id: row.id,
         name: row.name,
         description: row.description || '',
+        topics: safeParse(row.topics, []),
         createdAt: row.created_at,
         updatedAt: row.updated_at
       })),
@@ -531,8 +800,19 @@ function createStorage(userDataPath) {
       estimatedCostUsd: row.estimated_cost_usd === null || row.estimated_cost_usd === undefined
         ? null
         : Number(row.estimated_cost_usd),
+      baseEstimatedCostUsd: row.base_estimated_cost_usd === null || row.base_estimated_cost_usd === undefined
+        ? null
+        : Number(row.base_estimated_cost_usd),
+      calibrationMultiplier: Number(row.calibration_multiplier || 1),
+      finalEstimatedCostUsd: row.final_estimated_cost_usd === null || row.final_estimated_cost_usd === undefined
+        ? (row.estimated_cost_usd === null ? null : Number(row.estimated_cost_usd))
+        : Number(row.final_estimated_cost_usd),
       currency: row.currency || 'usd',
       priceSource: row.price_source || 'unknown',
+      pricingVersion: row.pricing_version || '',
+      tokenAccountingVersion: row.token_accounting_version || (String(row.price_source || '').includes('dashboard-calibration-2026-07-22')
+        ? 'legacy-dashboard-calibrated-v1'
+        : 'provider-reported-v2'),
       responseId: row.response_id || ''
     }));
   }
@@ -545,25 +825,14 @@ function createStorage(userDataPath) {
   }
 
   function rebuildIndexes() {
-    db.run('DELETE FROM note_search');
     db.run('DELETE FROM note_chunks');
     const notes = readNotes();
-    const insertSearch = db.prepare(`
-      INSERT INTO note_search (note_id, content_text, updated_at)
-      VALUES (?, ?, ?)
-    `);
     const insertChunk = db.prepare(`
       INSERT INTO note_chunks (id, note_id, title, section, kind, content_text, excerpt, position, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     notes.forEach((note) => {
       const chunks = noteToChunks(note);
-      const content = chunks.map((chunk) => chunk.contentText).join('\n').toLowerCase();
-      insertSearch.run([
-        note.id,
-        content,
-        note.updatedAt
-      ]);
       chunks.forEach((chunk, index) => {
         insertChunk.run([
           chunk.id,
@@ -578,7 +847,6 @@ function createStorage(userDataPath) {
         ]);
       });
     });
-    insertSearch.free();
     insertChunk.free();
   }
 
@@ -597,8 +865,143 @@ function createStorage(userDataPath) {
   }
 
   async function persist() {
+    persistQueue = persistQueue.then(() => persistNow());
+    await persistQueue;
+  }
+
+  function replaceNoteChunks(note) {
+    db.run('DELETE FROM note_chunks WHERE note_id = ?', [note.id]);
+    const insertChunk = db.prepare(`
+      INSERT INTO note_chunks (id, note_id, title, section, kind, content_text, excerpt, position, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    noteToChunks(note).forEach((chunk, index) => insertChunk.run([
+      chunk.id, chunk.noteId, chunk.title, chunk.section, chunk.kind, chunk.contentText,
+      excerpt(chunk.contentText, 300), index, note.updatedAt
+    ]));
+    insertChunk.free();
+  }
+
+  async function persistNow() {
     const bytes = db.export();
-    await fs.writeFile(dbPath, Buffer.from(bytes));
+    const tempPath = `${dbPath}.tmp`;
+    const handle = await fs.open(tempPath, 'w');
+    try {
+      await handle.writeFile(Buffer.from(bytes));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rotateFile(tempPath, dbPath, backupPath);
+  }
+
+  async function appendJournal(entry) {
+    journalQueue = journalQueue.then(async () => {
+      const handle = await fs.open(journalPath, 'a');
+      try {
+        await handle.writeFile(`${JSON.stringify(entry)}\n`, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    });
+    await journalQueue;
+  }
+
+  async function replayJournal() {
+    try {
+      const entries = [];
+      for (const candidatePath of [journalPath, previousJournalPath]) {
+        try {
+          const raw = await fs.readFile(candidatePath, 'utf8');
+          for (const line of raw.split(/\r?\n/).filter(Boolean)) {
+            try {
+              entries.push(JSON.parse(line));
+            } catch {
+              // Ignore a trailing partial record left by a process crash.
+            }
+          }
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error;
+        }
+      }
+      let replayed = loadDataSync();
+      let replayedRevision = revision;
+      for (const entry of entries.sort((a, b) => Number(a?.revision || 0) - Number(b?.revision || 0))) {
+        if (Number(entry?.revision) <= replayedRevision) continue;
+        if (entry?.data) {
+          replayed = entry.data;
+        } else if (Number(entry?.baseRevision) === replayedRevision && entry?.changes) {
+          replayed = entry.changes.snapshot || applyChangeBatch(replayed, entry.changes);
+        } else {
+          continue;
+        }
+        validateAppData(replayed);
+        replayedRevision = Number(entry.revision);
+      }
+      if (replayedRevision > revision) {
+        saveDataSync(replayed);
+        revision = replayedRevision;
+        latestSnapshot = replayed;
+        db.run("UPDATE metadata SET value = ? WHERE key = 'revision'", [String(revision)]);
+      }
+      await persist();
+      await unlinkIfExists(journalPath);
+      await unlinkIfExists(previousJournalPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+
+  function scheduleCheckpoint() {
+    if (checkpointScheduled || !latestSnapshot) return;
+    checkpointScheduled = true;
+    const targetRevision = revision;
+    checkpointQueue = checkpointQueue
+      .catch(() => {})
+      .then(() => new Promise((resolve) => setImmediate(resolve)))
+      .then(async () => {
+        db.run("UPDATE metadata SET value = ? WHERE key = 'revision'", [String(targetRevision)]);
+        await persist();
+        checkpointedRevision = Math.max(checkpointedRevision, targetRevision);
+      })
+      .finally(() => {
+        checkpointScheduled = false;
+        if (revision > targetRevision) scheduleCheckpoint();
+      });
+  }
+
+  async function compactJournal(committedRevision) {
+    journalQueue = journalQueue.then(async () => {
+      let entries = [];
+      try {
+        const raw = await fs.readFile(journalPath, 'utf8');
+        entries = raw.split(/\r?\n/).filter(Boolean).filter((line) => {
+          try {
+            return Number(JSON.parse(line)?.revision || 0) > committedRevision;
+          } catch {
+            return false;
+          }
+        });
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      if (!entries.length) {
+        await unlinkIfExists(journalPath);
+        await unlinkIfExists(previousJournalPath);
+        return;
+      }
+      const tempPath = `${journalPath}.tmp`;
+      const handle = await fs.open(tempPath, 'w');
+      try {
+        await handle.writeFile(`${entries.join('\n')}\n`, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rotateFile(tempPath, journalPath, previousJournalPath);
+    });
+    await journalQueue;
   }
 
   function queryRows(sql, params = []) {
@@ -620,12 +1023,21 @@ function createStorage(userDataPath) {
   return {
     defaultData,
     loadData,
+    loadSnapshot,
     saveData,
+    applyChanges,
+    applyChangesVolatile,
+    flushData,
+    recordAgentRun,
+    recordAgentStep,
     searchNotes,
     retrieveContext,
     getDataFilePath,
     paths: {
       dbPath,
+      backupPath,
+      journalPath,
+      previousJournalPath,
       legacyJsonPath
     }
   };
@@ -678,7 +1090,7 @@ function terms(text) {
 
 function scoreChunk(queryTerms, chunk, currentNoteId) {
   if (!queryTerms.length) return chunk.noteId === currentNoteId ? 1 : 0;
-  const text = normalize(`${chunk.title} ${chunk.section} ${chunk.contentText}`);
+  const text = chunk.normalizedText || normalize(`${chunk.title} ${chunk.section} ${chunk.contentText}`);
   const titleText = normalize(`${chunk.title} ${chunk.section}`);
   const score = queryTerms.reduce((total, term) => {
     if (!term) return total;
@@ -691,7 +1103,7 @@ function scoreChunk(queryTerms, chunk, currentNoteId) {
   return score * currentBoost * kindBoost;
 }
 
-function rankChunks(queryTerms, chunks, options = {}) {
+function rankChunks(queryTerms, chunks, options: { currentNoteId?: string; limit?: number } = {}) {
   const currentNoteId = options.currentNoteId || '';
   return chunks
     .map((chunk) => ({
@@ -751,6 +1163,7 @@ function normalizeSubjects(data) {
       id: subject?.id || createSubjectId(),
       name,
       description: subject?.description || '',
+      topics: Array.isArray(subject?.topics) ? subject.topics : [],
       createdAt: subject?.createdAt || subject?.created_at || now,
       updatedAt: subject?.updatedAt || subject?.updated_at || subject?.createdAt || now
     });
@@ -764,6 +1177,7 @@ function normalizeSubjects(data) {
       id: createSubjectId(),
       name,
       description: '',
+      topics: [],
       createdAt: note?.createdAt || now,
       updatedAt: note?.updatedAt || note?.createdAt || now
     });
@@ -781,6 +1195,93 @@ function inferSubjectsFromNotes(notes = []) {
 
 function escapeSql(value) {
   return String(value).replace(/'/g, "''");
+}
+
+function applyChangeBatch(current, changes) {
+  const applyEntities = (items, change: any = {}) => {
+    const deleted = new Set(Array.isArray(change.deleteIds) ? change.deleteIds : []);
+    const byId = new Map(items.filter((item) => !deleted.has(item.id)).map((item) => [item.id, item]));
+    for (const item of Array.isArray(change.upsert) ? change.upsert : []) byId.set(item.id, item);
+    return Array.from(byId.values());
+  };
+  const notes = applyEntities(current.notes || [], changes.notes);
+  const noteIds = new Set(notes.map((note) => note.id));
+  return {
+    ...current,
+    schemaVersion: SCHEMA_VERSION,
+    subjects: applyEntities(current.subjects || [], changes.subjects),
+    notes,
+    conversations: applyEntities(current.conversations || [], changes.conversations)
+      .filter((conversation) => noteIds.has(conversation.noteId)),
+    usageRecords: applyEntities(current.usageRecords || [], changes.usageRecords).slice(-1000),
+    settings: changes.settings ? sanitizeSettings({ ...current.settings, ...changes.settings }) : current.settings
+  };
+}
+
+function sanitizeSettings(settings) {
+  const { apiKey, ...safeSettings } = settings || {};
+  return safeSettings;
+}
+
+async function unlinkIfExists(filePath) {
+  try {
+    await fs.unlink(filePath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
+async function rotateFile(tempPath, targetPath, previousPath) {
+  await unlinkIfExists(previousPath);
+  try {
+    await fs.rename(targetPath, previousPath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  try {
+    await fs.rename(tempPath, targetPath);
+  } catch (error) {
+    try {
+      await fs.rename(previousPath, targetPath);
+    } catch {
+      // Keep the original failure; startup can still inspect the previous file.
+    }
+    throw error;
+  }
+}
+
+function validateAppData(data) {
+  if (!data || typeof data !== 'object') throw new Error('数据快照必须是对象');
+  for (const key of ['subjects', 'notes', 'conversations', 'usageRecords']) {
+    if (!Array.isArray(data[key])) throw new Error(`${key} 必须是数组`);
+    const ids = new Set();
+    for (const item of data[key]) {
+      if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id)) {
+        throw new Error(`${key} 包含缺失或重复的主键`);
+      }
+      ids.add(item.id);
+    }
+  }
+  const noteIds = new Set(data.notes.map((note) => note.id));
+  for (const note of data.notes) {
+    if (note.parentId && (!noteIds.has(note.parentId) || note.parentId === note.id)) note.parentId = undefined;
+  }
+  const byId: Map<string, any> = new Map(data.notes.map((note) => [note.id, note]));
+  for (const start of byId.keys()) {
+    const path = [];
+    const seen = new Map();
+    let current = start;
+    while (current && byId.has(current)) {
+      if (seen.has(current)) {
+        const cycle = path.slice(seen.get(current)).sort((a, b) => a.localeCompare(b));
+        if (cycle[0]) byId.get(cycle[0]).parentId = undefined;
+        break;
+      }
+      seen.set(current, path.length);
+      path.push(current);
+      current = byId.get(current)?.parentId;
+    }
+  }
 }
 
 module.exports = {

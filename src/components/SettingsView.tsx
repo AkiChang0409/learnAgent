@@ -40,61 +40,6 @@ const operationLabels: Record<string, string> = {
   unknown: '未知调用'
 };
 
-const dashboardUsageCalibration = {
-  marker: 'dashboard-calibration-2026-07-22',
-  modelPrefix: 'gpt-4.1-mini',
-  projectCostUsd: 0.36,
-  totalCostUsd: 0.57,
-  dashboardInputTokens: 2_987_000,
-  dashboardOutputTokens: 158_510,
-  recordedInputTokens: 212_618,
-  recordedOutputTokens: 69_801,
-  recordedEstimatedCostUsd: 0.182022
-};
-
-function usageCalibrationMultipliers() {
-  const projectShare = dashboardUsageCalibration.projectCostUsd / dashboardUsageCalibration.totalCostUsd;
-  return {
-    input: (dashboardUsageCalibration.dashboardInputTokens * projectShare) / dashboardUsageCalibration.recordedInputTokens,
-    output:
-      (dashboardUsageCalibration.dashboardOutputTokens * projectShare) / dashboardUsageCalibration.recordedOutputTokens,
-    cost: dashboardUsageCalibration.projectCostUsd / dashboardUsageCalibration.recordedEstimatedCostUsd
-  };
-}
-
-function shouldCalibrateUsageRecord(record: TokenUsageRecord) {
-  return (
-    record.provider === 'openai-compatible' &&
-    record.model.trim().toLowerCase().startsWith(dashboardUsageCalibration.modelPrefix) &&
-    !record.priceSource.includes(dashboardUsageCalibration.marker)
-  );
-}
-
-function roundTokenCount(value: number) {
-  return Math.max(0, Math.round(value || 0));
-}
-
-function calibrateUsageRecordForDisplay(record: TokenUsageRecord): TokenUsageRecord {
-  if (!shouldCalibrateUsageRecord(record)) return record;
-  const multipliers = usageCalibrationMultipliers();
-  const inputTokens = roundTokenCount(record.inputTokens * multipliers.input);
-  const outputTokens = roundTokenCount(record.outputTokens * multipliers.output);
-  const totalTokens = inputTokens + outputTokens;
-  const cachedInputTokens = Math.min(roundTokenCount(record.cachedInputTokens * multipliers.input), inputTokens);
-  const reasoningTokens = Math.min(roundTokenCount(record.reasoningTokens * multipliers.output), outputTokens);
-  return {
-    ...record,
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    cachedInputTokens,
-    reasoningTokens,
-    estimatedCostUsd:
-      record.estimatedCostUsd === null ? null : Number((record.estimatedCostUsd * multipliers.cost).toFixed(8)),
-    priceSource: `${record.priceSource}+${dashboardUsageCalibration.marker}`
-  };
-}
-
 function formatInteger(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value);
 }
@@ -139,6 +84,8 @@ export function SettingsView({
   isSyncing,
   onBack,
   onChange,
+  onSetApiKey,
+  onClearApiKey,
   onThemeChange,
   onTestConnection,
   onExportSync,
@@ -153,6 +100,8 @@ export function SettingsView({
   isSyncing: boolean;
   onBack: () => void;
   onChange: (settings: AiSettings) => void;
+  onSetApiKey: (value: string) => Promise<void>;
+  onClearApiKey: () => Promise<void>;
   onThemeChange: (theme: ThemeId) => void;
   onTestConnection: () => void;
   onExportSync: () => void;
@@ -160,16 +109,16 @@ export function SettingsView({
 }) {
   const [section, setSection] = useState<Section>('appearance');
   const [showApiKey, setShowApiKey] = useState(false);
+  const [apiKeyDraft, setApiKeyDraft] = useState('');
   const isLocal = settings.provider === 'local';
   const isOpenAICompatible = settings.provider === 'openai-compatible';
 
-  const calibratedUsageRecords = useMemo(
-    () => (usageRecords || []).map(calibrateUsageRecordForDisplay),
-    [usageRecords]
-  );
-  const usageSummary = summarizeUsage(calibratedUsageRecords);
-  const recentUsageRecords = [...calibratedUsageRecords].slice(-8).reverse();
-  const calibrationMultipliers = usageCalibrationMultipliers();
+  const verifiedUsageRecords = (usageRecords || []).filter((record) => record.tokenAccountingVersion !== 'legacy-dashboard-calibrated-v1');
+  const legacyUsageRecords = (usageRecords || []).filter((record) => record.tokenAccountingVersion === 'legacy-dashboard-calibrated-v1');
+  const usageSummary = summarizeUsage(verifiedUsageRecords);
+  const legacyUsageSummary = summarizeUsage(legacyUsageRecords);
+  const recentUsageRecords = [...(usageRecords || [])].slice(-8).reverse();
+  const legacyUsageCount = legacyUsageRecords.length;
 
   function update(patch: Partial<AiSettings>) {
     onChange({ ...settings, ...patch });
@@ -277,10 +226,10 @@ export function SettingsView({
                 <div className="secret-input">
                   <input
                     type={showApiKey ? 'text' : 'password'}
-                    value={settings.apiKey}
-                    onChange={(event) => update({ apiKey: event.target.value })}
+                    value={apiKeyDraft}
+                    onChange={(event) => setApiKeyDraft(event.target.value)}
                     disabled={isLocal}
-                    placeholder={isLocal ? 'Local fallback 不需要 API Key' : '输入 API Key'}
+                    placeholder={isLocal ? 'Local fallback 不需要 API Key' : settings.apiKeyConfigured ? '已安全保存；输入新值可替换' : '输入 API Key'}
                   />
                   <button
                     className="icon-button"
@@ -293,6 +242,24 @@ export function SettingsView({
                     {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                 </div>
+                {!isLocal && (
+                  <div className="secret-actions">
+                    <button
+                      className="secondary-action"
+                      type="button"
+                      disabled={!apiKeyDraft.trim()}
+                      onClick={async () => {
+                        await onSetApiKey(apiKeyDraft);
+                        setApiKeyDraft('');
+                      }}
+                    >
+                      保存密钥
+                    </button>
+                    {settings.apiKeyConfigured && (
+                      <button className="ghost-action" type="button" onClick={onClearApiKey}>清除密钥</button>
+                    )}
+                  </div>
+                )}
               </label>
 
               <div className={`connection-card ${settings.lastTestStatus || 'idle'}`}>
@@ -322,7 +289,7 @@ export function SettingsView({
               <p className="settings-desc">统计本地记录的模型调用量，费用为按内置价格表的估算。</p>
               <div className="usage-stats">
                 <div>
-                  <span>总 Token</span>
+                  <span>真实 Token 合计</span>
                   <strong>{formatInteger(usageSummary.totalTokens)}</strong>
                 </div>
                 <div>
@@ -338,6 +305,12 @@ export function SettingsView({
                   <strong>{formatCost(usageSummary.estimatedCostUsd)}</strong>
                 </div>
               </div>
+              {legacyUsageCount ? (
+                <div className="usage-legacy-summary">
+                  <strong>旧 Dashboard 校准记录（不计入上方合计）</strong>
+                  <span>{legacyUsageCount} 条 · {formatInteger(legacyUsageSummary.totalTokens)} 历史 Token · {formatCost(legacyUsageSummary.estimatedCostUsd)}</span>
+                </div>
+              ) : null}
               <div className="usage-details-row">
                 <span>缓存输入：{formatInteger(usageSummary.cachedInputTokens)}</span>
                 <span>推理 Token：{formatInteger(usageSummary.reasoningTokens)}</span>
@@ -352,6 +325,7 @@ export function SettingsView({
                         <span>
                           {record.model || providerDisplayName(record.provider as AiProvider)} ·{' '}
                           {formatInteger(record.totalTokens)} tokens · {formatCost(record.estimatedCostUsd)}
+                          {record.tokenAccountingVersion === 'legacy-dashboard-calibrated-v1' ? ' · 旧校准记录' : ''}
                         </span>
                       </div>
                       <time>
@@ -369,8 +343,8 @@ export function SettingsView({
                 )}
               </div>
               <small className="usage-note">
-                gpt-4.1-mini 按 2026-07-22 Dashboard 基线校准：输入 {calibrationMultipliers.input.toFixed(2)}x，输出{' '}
-                {calibrationMultipliers.output.toFixed(2)}x，费用 {calibrationMultipliers.cost.toFixed(2)}x。
+                Token 均保存 Provider 返回的真实值；校准倍率只作用于费用估价。
+                {legacyUsageCount ? ` 另有 ${legacyUsageCount} 条旧记录曾按 Dashboard 口径校准，已单独标记。` : ''}
               </small>
             </section>
           )}
@@ -407,7 +381,7 @@ export function SettingsView({
                 </div>
                 <div>
                   <span>存储方式</span>
-                  <strong>本地 JSON</strong>
+                  <strong>本地 SQLite</strong>
                 </div>
               </div>
             </section>

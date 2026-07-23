@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useCallback, useRef } from 'react';
 import { Loader2, Mic, MicOff, Sparkles, X } from 'lucide-react';
+import { useModalFocus } from '../hooks/useModalFocus';
 
 export function GenerateDialog({
   open,
@@ -24,20 +25,17 @@ export function GenerateDialog({
   onToggleListening: () => void;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !isGenerating) onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, isGenerating, onClose]);
+  const dialogRef = useRef<HTMLElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const close = useCallback(() => { if (!isGenerating) onClose(); }, [isGenerating, onClose]);
+  useModalFocus(open, dialogRef, close, inputRef);
 
   if (!open) return null;
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={() => !isGenerating && onClose()}>
       <section
+        ref={dialogRef}
         className="generate-dialog"
         role="dialog"
         aria-modal="true"
@@ -60,6 +58,7 @@ export function GenerateDialog({
         </div>
 
         <textarea
+          ref={inputRef}
           className="generate-input"
           value={value}
           autoFocus

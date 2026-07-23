@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import type { AppData, Conversation, MarkdownImportProgress, Note } from '../types';
+import type { AppData, Conversation, MarkdownImportMode, MarkdownImportProgress, MarkdownSourceSelection, Note } from '../types';
 import { cleanSubjectName, createId, ensureSubjects, markdownDraftToNotes, nowIso, subjectKnowledgeMapToNotes } from '../services/notes';
 
 type SetAppData = Dispatch<SetStateAction<AppData>>;
@@ -38,6 +38,8 @@ export function useKnowledgeImport({
 }) {
   const [isImportingMarkdown, setIsImportingMarkdown] = useState(false);
   const [importProgress, setImportProgress] = useState<MarkdownImportProgress | null>(null);
+  const [sourceSelection, setSourceSelection] = useState<MarkdownSourceSelection | null>(null);
+  const activeSelectionId = useRef('');
 
   useEffect(() => {
     return window.learnAgent.onMarkdownImportProgress((progress) => {
@@ -47,6 +49,19 @@ export function useKnowledgeImport({
 
   async function importMarkdown() {
     if (isImportingMarkdown || isGenerating) return;
+    try {
+      const selection = await window.learnAgent.selectMarkdownSource();
+      if (!selection.canceled) setSourceSelection(selection);
+    } catch (error) {
+      pushToast('error', `选择 Markdown 失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function startImport(mode: MarkdownImportMode) {
+    if (!sourceSelection || isImportingMarkdown || isGenerating) return;
+    const selection = sourceSelection;
+    activeSelectionId.current = selection.selectionId;
+    setSourceSelection(null);
     setIsImportingMarkdown(true);
     setImportProgress({
       stage: 'selecting-file',
@@ -55,7 +70,11 @@ export function useKnowledgeImport({
       updatedAt: nowIso()
     });
     try {
-      const result = await window.learnAgent.importMarkdown({ settings: data.settings });
+      const result = await window.learnAgent.startMarkdownImport({
+        selectionId: selection.selectionId,
+        mode,
+        settings: data.settings
+      });
       if (result.canceled) {
         setImportProgress(null);
         return;
@@ -173,6 +192,7 @@ export function useKnowledgeImport({
       });
       pushToast('error', message);
     } finally {
+      activeSelectionId.current = '';
       setIsImportingMarkdown(false);
       window.setTimeout(() => {
         setImportProgress((current) => current?.stage === 'done' ? null : current);
@@ -180,8 +200,18 @@ export function useKnowledgeImport({
     }
   }
 
+  async function cancelImport() {
+    if (!sourceSelection && !activeSelectionId.current) return;
+    const selectionId = sourceSelection?.selectionId || activeSelectionId.current;
+    await window.learnAgent.cancelMarkdownImport({ selectionId });
+    setSourceSelection(null);
+  }
+
   return {
     importMarkdown,
+    startImport,
+    cancelImport,
+    sourceSelection,
     isImportingMarkdown,
     importProgress
   };

@@ -14,7 +14,9 @@ LearnAgent 是一个本地优先的桌面学习助手，用来把学习主题整
 - 围绕当前笔记进行上下文对话
 - 通过 SQLite chunk 索引从历史笔记中召回相关内容辅助回答
 - 支持本地兜底、Ollama、OpenAI-compatible 接口
-- 支持在 UI 中配置 Provider、Endpoint、Model、API Key，并测试连接
+- 支持在 UI 中配置 Provider、Endpoint、Model，并用 Electron `safeStorage` 加密 API Key
+- Markdown 支持快速分析、深度多 Agent 分析和零模型调用的离线整理
+- revision + journal 自动保存；SQLite checkpoint 在 Worker Thread 中执行
 - 支持模型失败提示和本地兜底提示
 - 支持 Windows 安装包打包和 GitHub Release 发布
 
@@ -53,6 +55,26 @@ npm run dev
 npm run check
 ```
 
+运行单元与存储集成测试：
+
+```powershell
+npm run test:unit
+```
+
+运行 1,000 篇笔记存储基准：
+
+```powershell
+npm run benchmark:storage
+```
+
+检查生产包 gzip 预算（需要先构建）：
+
+```powershell
+npm run check:bundle-budget
+```
+
+发布 CI 会依次执行类型检查、单元/集成测试、Electron smoke、生产构建、JS/CSS gzip 预算、存储基准、依赖审计和安装包生成；任一步失败都不会发布。预算为 JS ≤100KB、CSS ≤10KB。
+
 构建前端：
 
 ```powershell
@@ -66,6 +88,14 @@ npm run dist:win
 ```
 
 打包结果会生成到本地 `release/` 目录。
+
+## 架构
+
+- renderer 使用领域 reducer 与 hooks 管理笔记库、自动保存、导入任务和 UI 状态，只通过窄化 preload Bridge 访问桌面能力。
+- Electron 主进程按窗口安全、IPC 校验、密钥、模型 Provider、Agent 注册表、导入限制、同步包和存储协调拆分为 TypeScript `.cts` 模块，编译产物输出到 `electron-dist/`。
+- SQLite/sql.js 运行在 Worker Thread；常规编辑只 upsert/delete 受影响实体并重建相关笔记 chunk，checkpoint 只负责后台导出与原子替换。
+- schema v5/v6 迁移前会保存数据库备份；未 checkpoint journal 会在启动时重放，运行中的 Agent 任务会标记为 interrupted，不会自动发起新的付费调用。
+- 模型输出先经过 JSON/schema、Evidence ID 与层级归一化校验；导入文档按不可信数据隔离，远程 Endpoint 只允许 HTTPS，Ollama HTTP 只允许 loopback。
 
 ## 模型配置
 
@@ -81,7 +111,7 @@ npm run dist:win
 
 - Provider 预设切换
 - Endpoint 和 Model 输入
-- API Key 输入、显示/隐藏、清空
+- API Key 设置、替换和清空；已保存密钥不会返回 renderer，也不会进入同步包
 - 连接测试
 - 最近一次连接测试状态和时间
 
@@ -97,7 +127,13 @@ OpenAI-compatible    https://api.openai.com/v1/chat/completions / gpt-4.1-mini
 
 ## Markdown 导入
 
-在学科首页或笔记页点击“导入 MD”，可以选择本地 `.md` / `.markdown` / `.txt` 文件。应用会通过可复用 Agent 编排读取文档内容，整理成一套结构化知识点：
+在学科首页或笔记页点击“导入 MD”，可以选择本地 `.md` / `.markdown` / `.txt` 文件。预检只向 renderer 返回临时 `selectionId`、文件名、字符数和预计块数，不暴露真实路径。随后可选择：
+
+- 快速分析（默认）：证据抽取 → 整体分析 → 质量评审
+- 深度分析：Ingestor → Orchestrator → Writer → Enricher → Validator → 本地合并
+- 离线整理：不调用模型，忠实按标题与原文生成基础知识地图
+
+应用会整理成一套结构化知识点：
 
 - 学科：识别文档所属学科或项目技术方向
 - 多主题：按知识体系或项目能力拆成多个主题
@@ -107,7 +143,7 @@ OpenAI-compatible    https://api.openai.com/v1/chat/completions / gpt-4.1-mini
 
 如果导入的是项目开发文档，生成结果会重点提炼项目功能、亮点、技术重点、实现难点、对应解决方案和可复用经验，适合快速了解一个项目的技术方案。
 
-长 Markdown 会先由“知识抽取 Agent”按标题和长度分块提炼，再交给“知识整理 Agent”生成最终 `SubjectKnowledgeMap`，避免一个 Agent 同时承担阅读、抽取、编排、写作导致质量下降。导入过程中会显示读取、分块、抽取、整理和保存进度；模型不可用时会使用本地规则兜底，仍可生成基础结构。
+导入上限为 2MiB、160,000 个处理字符和 16 个 chunk；深度模式最多 8 个主题、每主题 2 篇核心笔记、步骤并发度 3，Validator 最多触发一次定向重写。超限会明确要求拆分，不会静默截断。Local Provider 自动使用离线模式。
 
 ## 本地数据
 
@@ -116,6 +152,8 @@ OpenAI-compatible    https://api.openai.com/v1/chat/completions / gpt-4.1-mini
 ```text
 learn-agent.sqlite
 ```
+
+已确认变更会先 fsync 到 `learn-agent.journal.json`，后台再原子 checkpoint 到 SQLite；启动时会自动重放未 checkpoint 的 revision，并保留 `learn-agent.sqlite.backup`。API Key 单独使用操作系统安全存储加密。
 
 如果旧版本已经存在 `learn-agent-data.json`，应用首次启动 SQLite 版本时会自动导入旧数据，并在同一目录生成一份 JSON 备份：
 
@@ -143,16 +181,16 @@ git push origin --tags
 
 示例：
 
-- 当前版本：`1.0.1`
+- 当前版本：`1.0.2`
 - 执行：`npm version patch`
-- 新版本：`1.0.2`
-- 新 tag：`v1.0.2`
-- GitHub Release 附件：`LearnAgent-0.1.4-Setup.exe`
+- 新版本：`1.0.3`
+- 新 tag：`v1.0.3`
+- GitHub Release 附件：`LearnAgent-1.0.3-Setup.exe`
 
 也可以手动创建 tag：
 ```powershell
-git tag v0.1.1
-git push origin v0.1.1
+git tag v1.0.2
+git push origin v1.0.2
 ```
 
 ## 不应提交的内容
@@ -161,6 +199,9 @@ git push origin v0.1.1
 
 - `node_modules/`
 - `release/`
+- `dist/`（CI 生成）
+- `electron-dist/`（TypeScript 编译产物）
+- `.claude/settings.local.json`
 - `.env`
 - `.env.*`
 - `PROJECT_TECHNICAL_NOTES.md`

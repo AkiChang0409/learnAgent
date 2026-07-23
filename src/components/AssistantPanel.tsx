@@ -33,7 +33,7 @@ export function AssistantPanel({
   const statusClass = settings.provider === 'local' ? 'idle' : settings.lastTestStatus || 'idle';
 
   return (
-    <aside className={`assistant ${open ? 'open' : ''}`} aria-hidden={!open}>
+    <aside className={`assistant ${open ? 'open' : ''}`} aria-hidden={!open} inert={!open}>
       <div className="assistant-head">
         <div className="assistant-title">
           <Sparkles size={17} />

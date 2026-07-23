@@ -1,7 +1,7 @@
 import { CheckCircle2, FileText, Loader2 } from 'lucide-react';
 import type { MarkdownImportProgress } from '../types';
 
-export function ImportProgressPanel({ progress }: { progress: MarkdownImportProgress | null }) {
+export function ImportProgressPanel({ progress, onCancel }: { progress: MarkdownImportProgress | null; onCancel?: () => void }) {
   if (!progress) return null;
   const percent = Math.max(0, Math.min(progress.percent ?? 0, 100));
   const isDone = progress.stage === 'done';
@@ -24,6 +24,8 @@ export function ImportProgressPanel({ progress }: { progress: MarkdownImportProg
           {progress.fileName && <span>{progress.fileName}</span>}
           {progress.total ? <span>{progress.current || 0}/{progress.total}</span> : null}
           {progress.detail && <span>{progress.detail}</span>}
+          {progress.agentId && <span>{progress.agentId}</span>}
+          {progress.canCancel && onCancel && <button type="button" className="ghost-action" onClick={onCancel}>取消</button>}
         </div>
       </div>
     </section>

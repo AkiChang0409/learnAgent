@@ -26,6 +26,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Type check
+        run: npm run check
+
+      - name: Unit and integration tests
+        run: npm run test:unit
+
+      - name: Electron smoke
+        run: npm run test:electron-smoke
+
+      - name: Production build
+        run: npm run build
+
+      - name: Bundle budget
+        run: npm run check:bundle-budget
+
+      - name: Storage performance benchmark
+        run: npm run benchmark:storage
+
+      - name: Dependency audit
+        run: npm audit
+
       - name: Build installer
         run: npm run dist:win
 

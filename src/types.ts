@@ -7,7 +7,7 @@ export interface AiSettings {
   provider: AiProvider;
   endpoint: string;
   model: string;
-  apiKey: string;
+  apiKeyConfigured?: boolean;
   theme?: ThemeId;
   lastTestedAt?: string;
   lastTestStatus?: AiTestStatus;
@@ -36,8 +36,13 @@ export interface TokenUsageRecord {
   cachedInputTokens: number;
   reasoningTokens: number;
   estimatedCostUsd: number | null;
+  baseEstimatedCostUsd?: number | null;
+  calibrationMultiplier?: number;
+  finalEstimatedCostUsd?: number | null;
   currency: 'usd' | string;
   priceSource: string;
+  pricingVersion?: string;
+  tokenAccountingVersion?: 'provider-reported-v2' | 'legacy-dashboard-calibrated-v1' | string;
   responseId: string;
 }
 
@@ -71,6 +76,8 @@ export interface Subject {
   id: string;
   name: string;
   description?: string;
+  /** Declared topic names under this subject, including topics that have no notes yet. */
+  topics?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -101,6 +108,19 @@ export interface AppData {
   conversations: Conversation[];
   usageRecords: TokenUsageRecord[];
   settings: AiSettings;
+}
+
+export interface EntityChanges<T> {
+  upsert?: T[];
+  deleteIds?: string[];
+}
+
+export interface AppDataChanges {
+  subjects?: EntityChanges<Subject>;
+  notes?: EntityChanges<Note>;
+  conversations?: EntityChanges<Conversation>;
+  usageRecords?: EntityChanges<TokenUsageRecord>;
+  settings?: Partial<AiSettings>;
 }
 
 export interface GeneratedNoteDraft {
@@ -267,6 +287,17 @@ export type MarkdownImportStage =
   | 'fallback'
   | 'error';
 
+export type MarkdownImportMode = 'fast' | 'deep' | 'offline';
+
+export interface MarkdownSourceSelection {
+  canceled?: boolean;
+  selectionId: string;
+  fileName: string;
+  characterCount: number;
+  chunkCount: number;
+  estimatedCalls: Record<MarkdownImportMode, number>;
+}
+
 export interface MarkdownImportProgress {
   runId?: string;
   stage: MarkdownImportStage;
@@ -277,6 +308,12 @@ export interface MarkdownImportProgress {
   percent?: number;
   detail?: string;
   updatedAt: string;
+  mode?: MarkdownImportMode;
+  agentId?: string;
+  stepId?: string;
+  canCancel?: boolean;
+  estimatedCalls?: number;
+  actualCalls?: number;
 }
 
 export interface RagSource {
@@ -359,14 +396,20 @@ export interface SyncImportResult {
 }
 
 export interface LearnAgentBridge {
-  loadData: () => Promise<AppData>;
-  saveData: (data: AppData) => Promise<{ ok: boolean; filePath: string }>;
+  getAppInfo: () => Promise<{ version: string; name: string }>;
+  loadSnapshot: () => Promise<{ data: AppData; revision: number }>;
+  applyChanges: (payload: { baseRevision: number; changes: AppDataChanges }) => Promise<{ revision: number; durable: boolean }>;
+  flushData: () => Promise<{ revision: number; durable: boolean }>;
+  setApiKey: (value: string) => Promise<{ configured: boolean }>;
+  clearApiKey: () => Promise<{ configured: boolean }>;
   searchNotes: (query: string) => Promise<Note[]>;
   retrieveContext: (payload: { question: string; currentNote: Note; limit?: number }) => Promise<RagContextResult>;
   exportSyncPackage: () => Promise<SyncExportResult>;
   importSyncPackage: () => Promise<SyncImportResult>;
   generateNote: (payload: { input: string; settings: AiSettings }) => Promise<GeneratedNoteResult>;
-  importMarkdown: (payload: { settings: AiSettings }) => Promise<MarkdownImportResult>;
+  selectMarkdownSource: () => Promise<MarkdownSourceSelection>;
+  startMarkdownImport: (payload: { selectionId: string; mode: MarkdownImportMode; settings: AiSettings }) => Promise<MarkdownImportResult>;
+  cancelMarkdownImport: (payload: { selectionId: string }) => Promise<{ canceled: boolean }>;
   onMarkdownImportProgress: (handler: (progress: MarkdownImportProgress) => void) => () => void;
   chatWithNote: (payload: {
     question: string;

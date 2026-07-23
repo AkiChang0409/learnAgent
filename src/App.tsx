@@ -16,6 +16,7 @@ import { AssistantPanel } from './components/AssistantPanel';
 import { ConfirmDialog, type ConfirmRequest } from './components/ConfirmDialog';
 import { GenerateDialog } from './components/GenerateDialog';
 import { ImportProgressPanel } from './components/ImportProgressPanel';
+import { ImportModeDialog } from './components/ImportModeDialog';
 import { NoteView, type ListField } from './components/NoteView';
 import { SettingsView } from './components/SettingsView';
 import { ToastHost, type ToastMessage } from './components/ToastHost';
@@ -26,8 +27,7 @@ import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { cleanSubjectName, createId, draftToNote, ensureSubjects, nowIso } from './services/notes';
 import { retrieveContext } from './services/rag';
 import { applyTheme, resolveTheme } from './theme';
-
-const APP_VERSION = '0.2.0';
+import { mergeTopicNames, moveNoteInTree, removeNoteWithPromotedChildren, restoreRemovedNote, rootNotePosition, selectMostRecentNoteForSubject } from './domain/library';
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '未知错误';
@@ -48,7 +48,8 @@ interface SubjectSummary {
 }
 
 export default function App() {
-  const { data, setData, selectedNoteId, setSelectedNoteId, dataPath, isReady, loadError } = useAppData();
+  const [appVersion, setAppVersion] = useState('');
+  const { data, setData, selectedNoteId, setSelectedNoteId, dataPath, isReady, loadError, revision } = useAppData();
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [composer, setComposer] = useState('');
   const [noteSearch, setNoteSearch] = useState('');
@@ -62,9 +63,12 @@ export default function App() {
   const [view, setView] = useState<'note' | 'settings'>('note');
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
-  const [expandedSubjects, setExpandedSubjects] = useState<Set<string>>(() => new Set());
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+
+  useEffect(() => {
+    window.learnAgent.getAppInfo().then((info) => setAppVersion(info.version)).catch(() => setAppVersion('未知'));
+  }, []);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -95,7 +99,7 @@ export default function App() {
     if (loadError) pushToast('error', loadError);
   }, [loadError, pushToast]);
 
-  const saveState = useAutosave(data, isReady, (message) => pushToast('error', message));
+  const { saveState, retrySave } = useAutosave(data, isReady, revision, (message) => pushToast('error', message));
 
   const { isListening, voiceError, toggleListening } = useSpeechRecognition((text) => {
     setComposer((current) => `${current}${current ? ' ' : ''}${text}`.trim());
@@ -125,7 +129,7 @@ export default function App() {
         const latestUpdatedAt = notes
           .map((note) => note.updatedAt)
           .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || subject.updatedAt;
-        const topics = Array.from(new Set(notes.map((note) => note.topic.trim() || '未命名主题')));
+        const topics = mergeTopicNames(subject.topics, notes);
         return {
           id: subject.id,
           name: subject.name,
@@ -152,18 +156,25 @@ export default function App() {
     [subjectSummaries]
   );
 
-  // Focus the first subject on first load so "New note" has a sensible home.
+  // Topics explicitly declared on the current subject (incl. ones with no notes yet).
+  const currentSubjectTopics = useMemo(() => {
+    if (!selectedSubject) return [];
+    const subject = (data.subjects || []).find(
+      (item) => cleanSubjectName(item.name) === selectedSubject
+    );
+    return subject?.topics || [];
+  }, [data.subjects, selectedSubject]);
+
+  // Focus the first subject on first load so "New note" has a sensible home,
+  // and recover if the currently-focused subject was deleted.
   useEffect(() => {
     if (!isReady) return;
-    setSelectedSubject((current) => current ?? subjectSummaries[0]?.name ?? null);
+    setSelectedSubject((current) =>
+      current && subjectSummaries.some((subject) => subject.name === current)
+        ? current
+        : subjectSummaries[0]?.name ?? null
+    );
   }, [isReady, subjectSummaries]);
-
-  // Keep the note's subject accordion open when a note becomes selected.
-  useEffect(() => {
-    if (!selectedNote) return;
-    const subject = cleanSubjectName(selectedNote.subject);
-    setExpandedSubjects((current) => (current.has(subject) ? current : new Set(current).add(subject)));
-  }, [selectedNote]);
 
   useEffect(() => {
     const query = noteSearch.trim();
@@ -192,7 +203,7 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [noteSearch, pushToast, data.notes]);
 
-  const { importMarkdown, isImportingMarkdown, importProgress } = useKnowledgeImport({
+  const { importMarkdown, startImport, cancelImport, sourceSelection, isImportingMarkdown, importProgress } = useKnowledgeImport({
     data,
     setData,
     selectedSubject,
@@ -232,11 +243,62 @@ export default function App() {
         id: createId('subject'),
         name: cleanName,
         description: '',
+        topics: [],
         createdAt: updatedAt,
         updatedAt
       },
       ...subjects
     ];
+  }
+
+  // Ensure `subject` exists and has `topic` declared, so an empty topic persists
+  // even before it holds any notes.
+  function addTopicToSubject(subjects: Subject[], name: string, topic: string, updatedAt = nowIso()): Subject[] {
+    const cleanName = cleanSubjectName(name);
+    const cleanTopic = topic.trim();
+    if (!cleanTopic) return subjects;
+    const ensured = upsertSubject(subjects, cleanName, updatedAt);
+    return ensured.map((subject) => {
+      if (cleanSubjectName(subject.name).toLowerCase() !== cleanName.toLowerCase()) return subject;
+      const topics = subject.topics || [];
+      if (topics.some((item) => item.trim().toLowerCase() === cleanTopic.toLowerCase())) return subject;
+      return { ...subject, topics: [...topics, cleanTopic], updatedAt };
+    });
+  }
+
+  function topicExists(subjectName: string, topic: string) {
+    const cleanName = cleanSubjectName(subjectName);
+    const cleanTopic = topic.trim().toLowerCase();
+    const declared = (data.subjects || [])
+      .find((subject) => cleanSubjectName(subject.name).toLowerCase() === cleanName.toLowerCase())
+      ?.topics || [];
+    const fromNotes = data.notes
+      .filter((note) => cleanSubjectName(note.subject).toLowerCase() === cleanName.toLowerCase())
+      .map((note) => (note.topic.trim() || '未命名主题'));
+    return [...declared, ...fromNotes].some((item) => item.trim().toLowerCase() === cleanTopic);
+  }
+
+  function createTopic(rawName: string) {
+    const name = rawName.trim();
+    if (!name) {
+      pushToast('error', '请输入主题名称');
+      return;
+    }
+    if (!selectedSubject) {
+      pushToast('error', '请先在左上角选择或新建学科');
+      return;
+    }
+    const subjectName = cleanSubjectName(selectedSubject);
+    if (topicExists(subjectName, name)) {
+      pushToast('error', '这个主题已经存在');
+      return;
+    }
+    const now = nowIso();
+    setData((current) => ({
+      ...current,
+      subjects: addTopicToSubject(current.subjects || [], subjectName, name, now)
+    }));
+    pushToast('success', '已创建主题');
   }
 
   function createSubject(rawName: string) {
@@ -265,7 +327,6 @@ export default function App() {
       ]
     }));
     setSelectedSubject(cleanName);
-    setExpandedSubjects((current) => new Set(current).add(cleanName));
     setNoteSearch('');
     pushToast('success', '已创建学科');
   }
@@ -296,13 +357,6 @@ export default function App() {
       )
     }));
     if (selectedSubject === target.name) setSelectedSubject(cleanName);
-    setExpandedSubjects((current) => {
-      if (!current.has(target.name)) return current;
-      const next = new Set(current);
-      next.delete(target.name);
-      next.add(cleanName);
-      return next;
-    });
     pushToast('success', '学科已重命名');
   }
 
@@ -333,65 +387,6 @@ export default function App() {
       return;
     }
     performDeleteSubject(subject);
-  }
-
-  function noteSortValue(note: Note) {
-    return note.position ?? Number.MAX_SAFE_INTEGER;
-  }
-
-  function rootNotePosition(notes: Note[], subject: string, topic: string) {
-    const rootNotes = notes.filter((note) => !note.parentId && note.subject === subject && note.topic === topic);
-    return rootNotes.length ? Math.max(...rootNotes.map(noteSortValue)) + 1 : 0;
-  }
-
-  function hasDescendant(notes: Note[], parentId: string, childId: string): boolean {
-    const children = notes.filter((note) => note.parentId === parentId);
-    return children.some((child) => child.id === childId || hasDescendant(notes, child.id, childId));
-  }
-
-  function descendantIds(notes: Note[], parentId: string): Set<string> {
-    const ids = new Set<string>();
-    const visit = (noteId: string) => {
-      notes
-        .filter((note) => note.parentId === noteId)
-        .forEach((child) => {
-          ids.add(child.id);
-          visit(child.id);
-        });
-    };
-    visit(parentId);
-    return ids;
-  }
-
-  function notePositionKey(note: Pick<Note, 'subject' | 'topic' | 'parentId'>) {
-    return `${note.subject || '通用学习'}\u0000${note.topic || '未命名主题'}\u0000${note.parentId || ''}`;
-  }
-
-  function normalizeNotePositions(notes: Note[], preferredOrder?: { subject: string; topic: string; parentId: string; orderedIds: string[] }) {
-    const preferred = preferredOrder
-      ? new Map(preferredOrder.orderedIds.map((id, index) => [id, index]))
-      : null;
-    const preferredKey = preferredOrder
-      ? notePositionKey({ subject: preferredOrder.subject, topic: preferredOrder.topic, parentId: preferredOrder.parentId })
-      : '';
-    const groups = new Map<string, Note[]>();
-    notes.forEach((note) => {
-      const key = notePositionKey(note);
-      groups.set(key, [...(groups.get(key) || []), note]);
-    });
-
-    const positions = new Map<string, number>();
-    groups.forEach((group, key) => {
-      const sorted = [...group].sort((a, b) => {
-        if (preferred && key === preferredKey) {
-          return (preferred.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (preferred.get(b.id) ?? Number.MAX_SAFE_INTEGER);
-        }
-        return noteSortValue(a) - noteSortValue(b) || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-      });
-      sorted.forEach((note, index) => positions.set(note.id, index));
-    });
-
-    return notes.map((note) => ({ ...note, position: positions.get(note.id) ?? note.position ?? 0 }));
   }
 
   function updateSelectedNote(mutator: (note: Note) => Note) {
@@ -466,10 +461,10 @@ export default function App() {
     }
   }
 
-  function createBlankNote() {
+  function createBlankNote(topicArg?: string) {
     const now = nowIso();
     const subject = cleanSubjectName(selectedSubject);
-    const topic = '未命名主题';
+    const topic = (topicArg || '').trim() || '未命名主题';
     const note: Note = {
       id: createId('note'),
       title: '',
@@ -487,7 +482,7 @@ export default function App() {
     };
     setData((current) => ({
       ...current,
-      subjects: upsertSubject(current.subjects || [], subject, now),
+      subjects: addTopicToSubject(current.subjects || [], subject, topic, now),
       notes: [note, ...current.notes],
       conversations: [
         { id: createId('conversation'), noteId: note.id, title: note.title, messages: [], updatedAt: now },
@@ -502,8 +497,8 @@ export default function App() {
     if (!selectedNote) return;
     const removed = selectedNote;
     const removedConversation = data.conversations.find((conversation) => conversation.noteId === removed.id) || null;
-    const directChildIds = data.notes.filter((note) => note.parentId === removed.id).map((note) => note.id);
-    const promotedParentId = removed.parentId;
+    const removal = removeNoteWithPromotedChildren(data.notes, removed.id);
+    const directChildIds = removal.directChildIds;
     const childCount = directChildIds.length;
     const remainingInSubject = data.notes.filter(
       (note) => note.id !== removed.id && cleanSubjectName(note.subject) === cleanSubjectName(removed.subject)
@@ -511,11 +506,7 @@ export default function App() {
 
     setData((current) => ({
       ...current,
-      notes: normalizeNotePositions(
-        current.notes
-          .filter((note) => note.id !== removed.id)
-          .map((note) => (note.parentId === removed.id ? { ...note, parentId: promotedParentId } : note))
-      ),
+      notes: removeNoteWithPromotedChildren(current.notes, removed.id).notes,
       conversations: current.conversations.filter((conversation) => conversation.noteId !== removed.id)
     }));
     setSelectedNoteId(remainingInSubject[0]?.id || '');
@@ -525,12 +516,7 @@ export default function App() {
         if (current.notes.some((note) => note.id === removed.id)) return current;
         return {
           ...current,
-          notes: normalizeNotePositions([
-            ...current.notes.map((note) =>
-              directChildIds.includes(note.id) ? { ...note, parentId: removed.id } : note
-            ),
-            removed
-          ]),
+          notes: restoreRemovedNote(current.notes, removed, directChildIds),
           conversations:
             removedConversation && !current.conversations.some((conversation) => conversation.id === removedConversation.id)
               ? [removedConversation, ...current.conversations]
@@ -553,61 +539,10 @@ export default function App() {
     targetSubject?: string
   ) {
     setData((current) => {
-      const dragged = current.notes.find((note) => note.id === draggedId);
-      if (!dragged) return current;
-      const target = targetId ? current.notes.find((note) => note.id === targetId) : null;
-      if (targetId && !target) return current;
-      if (targetId === draggedId) return current;
-      if (targetId && hasDescendant(current.notes, draggedId, targetId)) return current;
-
-      const nextSubject = target?.subject || targetSubject || dragged.subject || '通用学习';
-      const nextTopic = placement === 'root'
-        ? dragged.topic
-        : placement === 'topic'
-          ? targetTopic || dragged.topic || '未命名主题'
-          : target?.topic || dragged.topic || '未命名主题';
-      const targetParentId = placement === 'root' || placement === 'topic'
-        ? undefined
-        : placement === 'inside'
-          ? target?.id
-          : target?.parentId;
-      const parentId = targetParentId || undefined;
-      const movedAt = nowIso();
-      const childIds = descendantIds(current.notes, draggedId);
-      const movedNotes = current.notes.map((note) =>
-        note.id === draggedId
-          ? { ...note, subject: nextSubject, topic: nextTopic, parentId, updatedAt: movedAt }
-          : childIds.has(note.id)
-            ? { ...note, subject: nextSubject, topic: nextTopic, updatedAt: movedAt }
-            : note
-      );
-      const siblingIds = movedNotes
-        .filter((note) =>
-          note.subject === nextSubject &&
-          note.topic === nextTopic &&
-          (note.parentId || '') === (parentId || '') &&
-          note.id !== draggedId
-        )
-        .sort((a, b) => noteSortValue(a) - noteSortValue(b) || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-        .map((note) => note.id);
-
-      let insertIndex = siblingIds.length;
-      if ((placement === 'before' || placement === 'after') && target) {
-        const targetIndex = siblingIds.indexOf(target.id);
-        insertIndex = targetIndex < 0 ? siblingIds.length : targetIndex + (placement === 'after' ? 1 : 0);
-      }
-      const orderedIds = [...siblingIds];
-      orderedIds.splice(insertIndex, 0, draggedId);
-
-      return {
-        ...current,
-        notes: normalizeNotePositions(movedNotes, {
-          subject: nextSubject,
-          topic: nextTopic,
-          parentId: parentId || '',
-          orderedIds
-        })
-      };
+      const notes = moveNoteInTree(current.notes, {
+        draggedId, targetId, placement, targetTopic, targetSubject, movedAt: nowIso()
+      });
+      return notes === current.notes ? current : { ...current, notes };
     });
   }
 
@@ -895,6 +830,33 @@ export default function App() {
     setData((current) => ({ ...current, settings }));
   }
 
+  async function setApiKey(value: string) {
+    try {
+      await window.learnAgent.setApiKey(value);
+      setData((current) => ({
+        ...current,
+        settings: { ...current.settings, apiKeyConfigured: true }
+      }));
+      pushToast('success', 'API Key 已使用系统安全存储加密');
+    } catch (error) {
+      pushToast('error', `保存 API Key 失败：${errorMessage(error)}`);
+      throw error;
+    }
+  }
+
+  async function clearApiKey() {
+    try {
+      await window.learnAgent.clearApiKey();
+      setData((current) => ({
+        ...current,
+        settings: { ...current.settings, apiKeyConfigured: false }
+      }));
+      pushToast('success', 'API Key 已清除');
+    } catch (error) {
+      pushToast('error', `清除 API Key 失败：${errorMessage(error)}`);
+    }
+  }
+
   function updateTheme(nextTheme: ThemeId) {
     setData((current) => ({ ...current, settings: { ...current.settings, theme: nextTheme } }));
   }
@@ -905,19 +867,13 @@ export default function App() {
     setView('note');
   }
 
-  function toggleSubject(name: string) {
-    setSelectedSubject(name);
-    setExpandedSubjects((current) => {
-      const next = new Set(current);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
-  function focusSubjectInRail(name: string) {
-    setSelectedSubject(name);
-    setExpandedSubjects((current) => new Set(current).add(name));
+  function switchSubject(name: string) {
+    const subject = cleanSubjectName(name);
+    const nextNote = selectMostRecentNoteForSubject(data.notes, subject);
+    setSelectedSubject(subject);
+    setSelectedNoteId(nextNote?.id || '');
+    setNoteSearch('');
+    setView('note');
   }
 
   function openGenerate() {
@@ -1032,22 +988,25 @@ export default function App() {
       <AppRail
         notes={data.notes}
         subjects={railSubjects}
+        currentSubject={selectedSubject}
+        currentSubjectTopics={currentSubjectTopics}
         selectedNoteId={selectedNoteId}
-        focusedSubject={selectedSubject}
         isSettingsOpen={view === 'settings'}
         noteSearch={noteSearch}
         searchResults={searchResults}
         saveState={saveState}
+        onRetrySave={retrySave}
         isImporting={isImportingMarkdown}
-        expandedSubjects={expandedSubjects}
         onSearchChange={setNoteSearch}
-        onToggleSubject={toggleSubject}
+        onSwitchSubject={switchSubject}
         onSelectNote={openNote}
         onCreateSubject={createSubject}
         onRenameSubject={renameSubject}
         onDeleteSubject={deleteSubject}
+        onCreateTopic={createTopic}
+        onCreateNoteInTopic={(topic) => createBlankNote(topic)}
         onMoveNote={moveNote}
-        onNewBlank={createBlankNote}
+        onNewBlank={() => createBlankNote()}
         onNewGenerate={openGenerate}
         onImport={importMarkdown}
         onOpenSettings={() => setView((current) => (current === 'settings' ? 'note' : 'settings'))}
@@ -1060,11 +1019,13 @@ export default function App() {
             theme={theme}
             usageRecords={data.usageRecords}
             dataPath={dataPath}
-            appVersion={APP_VERSION}
+            appVersion={appVersion || '…'}
             isTesting={isTestingConnection}
             isSyncing={isSyncing}
             onBack={() => setView('note')}
             onChange={updateSettings}
+            onSetApiKey={setApiKey}
+            onClearApiKey={clearApiKey}
             onThemeChange={updateTheme}
             onTestConnection={testConnection}
             onExportSync={exportSyncPackage}
@@ -1084,7 +1045,7 @@ export default function App() {
             onMoveSection={moveSection}
             onUpdateList={updateList}
             onToggleAssistant={() => setAssistantOpen((open) => !open)}
-            onNavigateSubject={focusSubjectInRail}
+            onNavigateSubject={switchSubject}
           />
         ) : (
           <div className="welcome">
@@ -1098,7 +1059,7 @@ export default function App() {
                 : '记录今天学到的东西，让 AI 帮你整理成结构化知识，并随时追问。'}
             </p>
             <div className="welcome-actions">
-              <button className="primary-action" type="button" onClick={createBlankNote}>
+              <button className="primary-action" type="button" onClick={() => createBlankNote()}>
                 <FilePlus2 size={17} />
                 空白笔记
               </button>
@@ -1116,7 +1077,7 @@ export default function App() {
 
         {importProgress && (
           <div className="stage-progress">
-            <ImportProgressPanel progress={importProgress} />
+            <ImportProgressPanel progress={importProgress} onCancel={cancelImport} />
           </div>
         )}
       </main>
@@ -1149,6 +1110,8 @@ export default function App() {
         onToggleListening={toggleListening}
         onClose={() => setShowGenerate(false)}
       />
+
+      <ImportModeDialog selection={sourceSelection} onStart={startImport} onClose={cancelImport} />
 
       <ConfirmDialog request={confirm} onCancel={() => setConfirm(null)} />
 

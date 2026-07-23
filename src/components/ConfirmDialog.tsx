@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useRef } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import { useModalFocus } from '../hooks/useModalFocus';
 
 export interface ConfirmRequest {
   title: string;
@@ -16,23 +17,17 @@ export function ConfirmDialog({
   request: ConfirmRequest | null;
   onCancel: () => void;
 }) {
-  const confirmRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    if (!request) return;
-    confirmRef.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [request, onCancel]);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const close = useCallback(() => onCancel(), [onCancel]);
+  useModalFocus(Boolean(request), dialogRef, close, cancelRef);
 
   if (!request) return null;
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
       <section
+        ref={dialogRef}
         className="confirm-dialog"
         role="alertdialog"
         aria-modal="true"
@@ -49,13 +44,12 @@ export function ConfirmDialog({
           </div>
         </div>
         <div className="confirm-actions">
-          <button className="ghost-action" type="button" onClick={onCancel}>
+          <button className="ghost-action" type="button" ref={cancelRef} onClick={onCancel}>
             {request.cancelLabel || '取消'}
           </button>
           <button
             className="danger-action"
             type="button"
-            ref={confirmRef}
             onClick={() => {
               request.onConfirm();
               onCancel();

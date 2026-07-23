@@ -1,20 +1,17 @@
 import type { AiProvider, AiSettings } from '../types';
 
-const providerDefaults: Record<AiProvider, Pick<AiSettings, 'endpoint' | 'model' | 'apiKey'>> = {
+const providerDefaults: Record<AiProvider, Pick<AiSettings, 'endpoint' | 'model'>> = {
   local: {
     endpoint: '',
-    model: '',
-    apiKey: ''
+    model: ''
   },
   ollama: {
     endpoint: 'http://127.0.0.1:11434/api/chat',
-    model: 'llama3.1',
-    apiKey: ''
+    model: 'llama3.1'
   },
   'openai-compatible': {
     endpoint: 'https://api.openai.com/v1/chat/completions',
-    model: 'gpt-4.1-mini',
-    apiKey: ''
+    model: 'gpt-4.1-mini'
   }
 };
 
@@ -25,9 +22,6 @@ export function applyProviderPreset(current: AiSettings, provider: AiProvider): 
     provider,
     endpoint: preset.endpoint,
     model: preset.model,
-    // 保留已填写的 API Key：切换 Provider 只重置 Endpoint/Model 到预设，
-    // 不应丢弃用户的密钥，否则切走再切回 openai-compatible 时 Key 会消失。
-    apiKey: current.apiKey,
     lastTestStatus: 'idle',
     lastTestMessage: '切换 Provider 后尚未测试连接',
     lastTestedAt: undefined

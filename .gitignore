@@ -1,5 +1,8 @@
 node_modules/
 release/
+dist/
+electron-dist/
+.claude/settings.local.json
 
 .env
 .env.*

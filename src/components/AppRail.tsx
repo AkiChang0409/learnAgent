@@ -78,11 +78,16 @@ function buildNoteTree(notes: Note[]): NoteTreeNode[] {
   return roots;
 }
 
-function buildTopicGroups(notes: Note[]): TopicGroup[] {
+function buildTopicGroups(notes: Note[], declaredTopics: string[] = []): TopicGroup[] {
   const groups = new Map<string, Note[]>();
   notes.forEach((note) => {
     const topic = note.topic.trim() || '未命名主题';
     groups.set(topic, [...(groups.get(topic) || []), note]);
+  });
+  // Include declared topics that have no notes yet so empty topics stay visible.
+  declaredTopics.forEach((topic) => {
+    const clean = topic.trim() || '未命名主题';
+    if (!groups.has(clean)) groups.set(clean, []);
   });
 
   return Array.from(groups.entries())
@@ -93,26 +98,34 @@ function buildTopicGroups(notes: Note[]): TopicGroup[] {
       latestUpdatedAt:
         topicNotes.map((note) => note.updatedAt).sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || ''
     }))
-    .sort((a, b) => new Date(b.latestUpdatedAt).getTime() - new Date(a.latestUpdatedAt).getTime());
+    .sort((a, b) => {
+      // Empty (just-created) topics have no timestamp — float them to the top.
+      const ta = a.latestUpdatedAt ? new Date(a.latestUpdatedAt).getTime() : Number.POSITIVE_INFINITY;
+      const tb = b.latestUpdatedAt ? new Date(b.latestUpdatedAt).getTime() : Number.POSITIVE_INFINITY;
+      return tb - ta;
+    });
 }
 
 export function AppRail({
   notes,
   subjects,
+  currentSubject,
+  currentSubjectTopics,
   selectedNoteId,
-  focusedSubject,
   isSettingsOpen,
   noteSearch,
   searchResults,
   saveState,
+  onRetrySave,
   isImporting,
-  expandedSubjects,
   onSearchChange,
-  onToggleSubject,
+  onSwitchSubject,
   onSelectNote,
   onCreateSubject,
   onRenameSubject,
   onDeleteSubject,
+  onCreateTopic,
+  onCreateNoteInTopic,
   onMoveNote,
   onNewBlank,
   onNewGenerate,
@@ -121,20 +134,23 @@ export function AppRail({
 }: {
   notes: Note[];
   subjects: RailSubject[];
+  currentSubject: string | null;
+  currentSubjectTopics: string[];
   selectedNoteId: string;
-  focusedSubject: string | null;
   isSettingsOpen: boolean;
   noteSearch: string;
   searchResults: Note[];
   saveState: SaveState;
+  onRetrySave: () => void;
   isImporting: boolean;
-  expandedSubjects: Set<string>;
   onSearchChange: (value: string) => void;
-  onToggleSubject: (name: string) => void;
+  onSwitchSubject: (name: string) => void;
   onSelectNote: (noteId: string, subject: string) => void;
   onCreateSubject: (name: string) => void;
   onRenameSubject: (id: string, name: string) => void;
   onDeleteSubject: (subject: RailSubject) => void;
+  onCreateTopic: (name: string) => void;
+  onCreateNoteInTopic: (topic: string) => void;
   onMoveNote: (
     draggedId: string,
     targetId: string | null,
@@ -148,25 +164,30 @@ export function AppRail({
   onOpenSettings: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [subjectMenuOpen, setSubjectMenuOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  const [creatingTopic, setCreatingTopic] = useState(false);
+  const [newTopicName, setNewTopicName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
+  const [collapsedTopics, setCollapsedTopics] = useState<Set<string>>(() => new Set());
   const knownExpandableIds = useRef<Set<string>>(new Set());
 
   const isSearching = Boolean(noteSearch.trim());
 
-  const notesBySubject = useMemo(() => {
-    const map = new Map<string, Note[]>();
-    notes.forEach((note) => {
-      const subject = cleanSubjectName(note.subject);
-      map.set(subject, [...(map.get(subject) || []), note]);
-    });
-    return map;
-  }, [notes]);
+  const currentSubjectNotes = useMemo(
+    () => (currentSubject ? notes.filter((note) => cleanSubjectName(note.subject) === currentSubject) : []),
+    [notes, currentSubject]
+  );
+
+  const topicGroups = useMemo(
+    () => buildTopicGroups(currentSubjectNotes, currentSubjectTopics),
+    [currentSubjectNotes, currentSubjectTopics]
+  );
 
   // Auto-expand newly-seen note groups so nested notes are visible by default.
   useEffect(() => {
@@ -182,11 +203,34 @@ export function AppRail({
     });
   }, [notes]);
 
+  // Keep the selected note's topic open so it stays visible after selection.
+  useEffect(() => {
+    if (!selectedNoteId) return;
+    const note = notes.find((item) => item.id === selectedNoteId);
+    if (!note) return;
+    const topic = note.topic.trim() || '未命名主题';
+    setCollapsedTopics((current) => {
+      if (!current.has(topic)) return current;
+      const next = new Set(current);
+      next.delete(topic);
+      return next;
+    });
+  }, [selectedNoteId, notes]);
+
   function toggleExpanded(noteId: string) {
     setExpandedIds((current) => {
       const next = new Set(current);
       if (next.has(noteId)) next.delete(noteId);
       else next.add(noteId);
+      return next;
+    });
+  }
+
+  function toggleTopic(topic: string) {
+    setCollapsedTopics((current) => {
+      const next = new Set(current);
+      if (next.has(topic)) next.delete(topic);
+      else next.add(topic);
       return next;
     });
   }
@@ -197,6 +241,7 @@ export function AppRail({
     onCreateSubject(name);
     setNewName('');
     setCreating(false);
+    setSubjectMenuOpen(false);
   }
 
   function submitRename(id: string) {
@@ -204,6 +249,20 @@ export function AppRail({
     if (name) onRenameSubject(id, name);
     setEditingId(null);
     setEditingName('');
+  }
+
+  function submitCreateTopic() {
+    const name = newTopicName.trim();
+    if (!name) return;
+    onCreateTopic(name);
+    setNewTopicName('');
+    setCreatingTopic(false);
+  }
+
+  function closeSubjectMenu() {
+    setSubjectMenuOpen(false);
+    setCreating(false);
+    setEditingId(null);
   }
 
   function finishDrop() {
@@ -229,12 +288,142 @@ export function AppRail({
   return (
     <aside className="rail">
       <div className="rail-head">
-        <div className="rail-brand">
-          <span className="rail-logo">
-            <Sparkles size={16} />
-          </span>
-          <strong>LearnAgent</strong>
+        <div className="subject-switcher">
+          <button
+            className="subject-switcher-btn"
+            type="button"
+            onClick={() => setSubjectMenuOpen((open) => !open)}
+            aria-expanded={subjectMenuOpen}
+            aria-label="切换学科"
+            title="切换学科"
+          >
+            <span className="rail-logo">
+              <Sparkles size={15} />
+            </span>
+            <span className="subject-switcher-name">{currentSubject || '选择学科'}</span>
+            <ChevronDown size={15} className="subject-switcher-caret" />
+          </button>
+
+          {subjectMenuOpen && (
+            <>
+              <div className="menu-backdrop" onClick={closeSubjectMenu} />
+              <div className="subject-menu" role="menu">
+                <div className="subject-menu-list">
+                  {subjects.length ? (
+                    subjects.map((subject) =>
+                      editingId === subject.id ? (
+                        <form
+                          className="subject-rename"
+                          key={subject.id}
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            submitRename(subject.id);
+                          }}
+                        >
+                          <input
+                            value={editingName}
+                            autoFocus
+                            onChange={(event) => setEditingName(event.target.value)}
+                            aria-label="学科名称"
+                          />
+                          <button className="icon-button ghost" type="submit" aria-label="保存" title="保存">
+                            <Check size={15} />
+                          </button>
+                          <button
+                            className="icon-button ghost"
+                            type="button"
+                            onClick={() => setEditingId(null)}
+                            aria-label="取消"
+                            title="取消"
+                          >
+                            <X size={15} />
+                          </button>
+                        </form>
+                      ) : (
+                        <div
+                          className={`subject-menu-item ${subject.name === currentSubject ? 'active' : ''}`}
+                          key={subject.id}
+                        >
+                          <button
+                            className="subject-menu-pick"
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={subject.name === currentSubject}
+                            onClick={() => {
+                              onSwitchSubject(subject.name);
+                              closeSubjectMenu();
+                            }}
+                          >
+                            <Folder size={14} />
+                            <span className="subject-menu-name">{subject.name}</span>
+                            <small>{subject.noteCount}</small>
+                            {subject.name === currentSubject && <Check size={14} className="subject-menu-check" />}
+                          </button>
+                          <span className="subject-menu-actions">
+                            <button
+                              className="icon-button ghost"
+                              type="button"
+                              onClick={() => {
+                                setEditingId(subject.id);
+                                setEditingName(subject.name);
+                              }}
+                              aria-label="重命名学科"
+                              title="重命名"
+                            >
+                              <Pencil size={13} />
+                            </button>
+                            <button
+                              className="icon-button ghost danger"
+                              type="button"
+                              onClick={() => {
+                                closeSubjectMenu();
+                                onDeleteSubject(subject);
+                              }}
+                              aria-label="删除学科"
+                              title="删除学科"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </span>
+                        </div>
+                      )
+                    )
+                  ) : (
+                    <p className="subject-menu-empty">还没有学科，先新建一个。</p>
+                  )}
+                </div>
+
+                {creating ? (
+                  <form
+                    className="subject-create"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      submitCreate();
+                    }}
+                  >
+                    <input
+                      value={newName}
+                      autoFocus
+                      onChange={(event) => setNewName(event.target.value)}
+                      onBlur={() => !newName.trim() && setCreating(false)}
+                      placeholder="学科名称"
+                      aria-label="新学科名称"
+                    />
+                    <button className="icon-button ghost" type="submit" aria-label="创建" title="创建">
+                      <Check size={15} />
+                    </button>
+                  </form>
+                ) : (
+                  <button className="subject-menu-add" type="button" onClick={() => setCreating(true)}>
+                    <Plus size={15} />
+                    新建学科
+                  </button>
+                )}
+              </div>
+            </>
+          )}
         </div>
+
         <div className="rail-new">
           <button className="primary-action compact" type="button" onClick={() => setMenuOpen((open) => !open)}>
             <Plus size={16} />
@@ -324,190 +513,129 @@ export function AppRail({
           ) : (
             <p className="rail-empty">没有匹配「{noteSearch.trim()}」的笔记。</p>
           )
+        ) : !currentSubject ? (
+          <p className="rail-empty">先在左上角新建一个学科，再开始记笔记。</p>
         ) : (
           <>
-            {subjects.map((subject) => {
-              const expanded = expandedSubjects.has(subject.name);
-              const subjectNotes = notesBySubject.get(subject.name) || [];
-              const topicGroups = buildTopicGroups(subjectNotes);
-              const isRootDrop = dropTarget?.placement === 'root' && dropTarget.subject === subject.name;
-              return (
-                <section className="rail-subject" key={subject.id}>
-                  {editingId === subject.id ? (
-                    <form
-                      className="subject-rename"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        submitRename(subject.id);
-                      }}
-                    >
-                      <input
-                        value={editingName}
-                        autoFocus
-                        onChange={(event) => setEditingName(event.target.value)}
-                        aria-label="学科名称"
+            {topicGroups.map((group) => {
+            const collapsed = collapsedTopics.has(group.topic);
+            const isTopicDrop =
+              dropTarget?.placement === 'topic' &&
+              dropTarget.subject === currentSubject &&
+              dropTarget.topic === group.topic;
+            return (
+              <div className="topic-group" key={group.topic}>
+                <div
+                  className={`topic-row ${isTopicDrop ? 'drop-inside' : ''}`}
+                  onDragOver={(event) => {
+                    if (!draggedId) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setDropTarget({
+                      subject: currentSubject,
+                      noteId: null,
+                      placement: 'topic',
+                      topic: group.topic
+                    });
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (draggedId) {
+                      onMoveNote(draggedId, null, 'topic', group.topic, currentSubject);
+                      setDraggedId(null);
+                      setDropTarget(null);
+                    }
+                  }}
+                >
+                  <button
+                    className="topic-toggle"
+                    type="button"
+                    aria-expanded={!collapsed}
+                    onClick={() => toggleTopic(group.topic)}
+                  >
+                    {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    <Folder size={14} />
+                    <span>{group.topic}</span>
+                    <small>{group.noteCount}</small>
+                  </button>
+                  <button
+                    className="topic-add-note"
+                    type="button"
+                    onClick={() => onCreateNoteInTopic(group.topic)}
+                    aria-label={`在${group.topic}中新建笔记`}
+                    title="在此主题中新建笔记"
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+                {!collapsed && (
+                  <div className="topic-notes">
+                    {group.nodes.map((node) => (
+                      <NoteTreeItem
+                        key={node.note.id}
+                        node={node}
+                        depth={0}
+                        subject={currentSubject}
+                        selectedNoteId={selectedNoteId}
+                        expandedIds={expandedIds}
+                        draggedId={draggedId}
+                        dropTarget={dropTarget}
+                        onSelectNote={onSelectNote}
+                        onToggleExpanded={toggleExpanded}
+                        onDragStart={setDraggedId}
+                        onDragEnd={() => {
+                          setDraggedId(null);
+                          setDropTarget(null);
+                        }}
+                        onDropTargetChange={setDropTarget}
+                        onFinishDrop={finishDrop}
+                        onPromoteToTopic={(note) => onMoveNote(note.id, null, 'topic', note.topic, currentSubject)}
                       />
-                      <button className="icon-button ghost" type="submit" aria-label="保存" title="保存">
-                        <Check size={15} />
-                      </button>
-                      <button
-                        className="icon-button ghost"
-                        type="button"
-                        onClick={() => setEditingId(null)}
-                        aria-label="取消"
-                        title="取消"
-                      >
-                        <X size={15} />
-                      </button>
-                    </form>
-                  ) : (
-                    <div
-                      className={`subject-row ${focusedSubject === subject.name ? 'focused' : ''} ${
-                        isRootDrop ? 'drop-inside' : ''
-                      }`}
-                      onDragOver={(event) => {
-                        if (!draggedId) return;
-                        event.preventDefault();
-                        setDropTarget({ subject: subject.name, noteId: null, placement: 'root' });
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        finishDrop();
-                      }}
-                    >
-                      <button
-                        className="subject-toggle"
-                        type="button"
-                        onClick={() => onToggleSubject(subject.name)}
-                        aria-expanded={expanded}
-                      >
-                        {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                        <Folder size={15} />
-                        <span className="subject-name">{subject.name}</span>
-                        <small>{subject.noteCount}</small>
-                      </button>
-                      <div className="subject-actions">
-                        <button
-                          className="icon-button ghost"
-                          type="button"
-                          onClick={() => {
-                            setEditingId(subject.id);
-                            setEditingName(subject.name);
-                          }}
-                          aria-label="重命名学科"
-                          title="重命名"
-                        >
-                          <Pencil size={14} />
-                        </button>
-                        <button
-                          className="icon-button ghost danger"
-                          type="button"
-                          onClick={() => onDeleteSubject(subject)}
-                          aria-label="删除学科"
-                          title="删除学科"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {expanded && (
-                    <div className="subject-tree">
-                      {topicGroups.length ? (
-                        topicGroups.map((group) => {
-                          const isTopicDrop =
-                            dropTarget?.placement === 'topic' &&
-                            dropTarget.subject === subject.name &&
-                            dropTarget.topic === group.topic;
-                          return (
-                            <div className="topic-group" key={group.topic}>
-                              <div
-                                className={`topic-row ${isTopicDrop ? 'drop-inside' : ''}`}
-                                onDragOver={(event) => {
-                                  if (!draggedId) return;
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  setDropTarget({
-                                    subject: subject.name,
-                                    noteId: null,
-                                    placement: 'topic',
-                                    topic: group.topic
-                                  });
-                                }}
-                                onDrop={(event) => {
-                                  event.preventDefault();
-                                  event.stopPropagation();
-                                  if (draggedId) {
-                                    onMoveNote(draggedId, null, 'topic', group.topic, subject.name);
-                                    setDraggedId(null);
-                                    setDropTarget(null);
-                                  }
-                                }}
-                              >
-                                <Folder size={13} />
-                                <span>{group.topic}</span>
-                                <small>{group.noteCount}</small>
-                              </div>
-                              <div className="topic-notes">
-                                {group.nodes.map((node) => (
-                                  <NoteTreeItem
-                                    key={node.note.id}
-                                    node={node}
-                                    depth={0}
-                                    subject={subject.name}
-                                    selectedNoteId={selectedNoteId}
-                                    expandedIds={expandedIds}
-                                    draggedId={draggedId}
-                                    dropTarget={dropTarget}
-                                    onSelectNote={onSelectNote}
-                                    onToggleExpanded={toggleExpanded}
-                                    onDragStart={setDraggedId}
-                                    onDragEnd={() => {
-                                      setDraggedId(null);
-                                      setDropTarget(null);
-                                    }}
-                                    onDropTargetChange={setDropTarget}
-                                    onFinishDrop={finishDrop}
-                                  />
-                                ))}
-                              </div>
-                            </div>
-                          );
-                        })
-                      ) : (
-                        <p className="subject-empty-note">还没有笔记</p>
-                      )}
-                    </div>
-                  )}
-                </section>
+                    ))}
+                  </div>
+                )}
+              </div>
               );
             })}
-
-            {creating ? (
+            {!topicGroups.length && !creatingTopic && (
+              <p className="rail-empty">这个学科还没有主题，先创建一个主题开始整理。</p>
+            )}
+            {creatingTopic ? (
               <form
-                className="subject-create"
+                className="topic-create"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  submitCreate();
+                  submitCreateTopic();
                 }}
               >
                 <input
-                  value={newName}
+                  value={newTopicName}
                   autoFocus
-                  onChange={(event) => setNewName(event.target.value)}
-                  onBlur={() => !newName.trim() && setCreating(false)}
-                  placeholder="学科名称"
-                  aria-label="新学科名称"
+                  onChange={(event) => setNewTopicName(event.target.value)}
+                  placeholder="主题名称"
+                  aria-label="新主题名称"
                 />
-                <button className="icon-button ghost" type="submit" aria-label="创建" title="创建">
+                <button className="icon-button ghost" type="submit" aria-label="创建主题" title="创建主题">
                   <Check size={15} />
+                </button>
+                <button
+                  className="icon-button ghost"
+                  type="button"
+                  onClick={() => {
+                    setCreatingTopic(false);
+                    setNewTopicName('');
+                  }}
+                  aria-label="取消创建主题"
+                  title="取消"
+                >
+                  <X size={15} />
                 </button>
               </form>
             ) : (
-              <button className="subject-add" type="button" onClick={() => setCreating(true)}>
-                <Plus size={15} />
-                新学科
+              <button className="topic-create-trigger" type="button" onClick={() => setCreatingTopic(true)}>
+                <Plus size={14} />
+                新建主题
               </button>
             )}
           </>
@@ -523,10 +651,13 @@ export function AppRail({
           <Settings size={16} />
           设置
         </button>
-        <span className={`save-dot ${saveState}`} title={saveStateLabel(saveState)}>
+        <span className={`save-dot ${saveState}`} title={saveStateLabel(saveState)} aria-live="polite">
           {saveState === 'saving' ? <Loader2 className="spin" size={13} /> : null}
           {saveStateLabel(saveState)}
         </span>
+        {saveState === 'error' ? (
+          <button className="rail-save-retry" type="button" onClick={onRetrySave}>重试</button>
+        ) : null}
       </div>
     </aside>
   );
@@ -534,6 +665,7 @@ export function AppRail({
 
 function saveStateLabel(state: SaveState) {
   if (state === 'saving') return '保存中';
+  if (state === 'received') return '变更已接收';
   if (state === 'saved') return '已保存';
   if (state === 'error') return '保存失败';
   return '已同步';
@@ -552,7 +684,8 @@ function NoteTreeItem({
   onDragStart,
   onDragEnd,
   onDropTargetChange,
-  onFinishDrop
+  onFinishDrop,
+  onPromoteToTopic
 }: {
   node: NoteTreeNode;
   depth: number;
@@ -567,6 +700,7 @@ function NoteTreeItem({
   onDragEnd: () => void;
   onDropTargetChange: (target: DropTarget) => void;
   onFinishDrop: () => void;
+  onPromoteToTopic: (note: Note) => void;
 }) {
   const { note, children } = node;
   const hasChildren = children.length > 0;
@@ -626,10 +760,31 @@ function NoteTreeItem({
         >
           {hasChildren ? isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} /> : <span />}
         </button>
-        <button className="note-row-main" onClick={() => onSelectNote(note.id, subject)} type="button">
+        <button
+          className="note-row-main"
+          onClick={() => onSelectNote(note.id, subject)}
+          onKeyDown={(event) => {
+            if (event.altKey && event.key === 'Home') {
+              event.preventDefault();
+              onPromoteToTopic(note);
+            }
+          }}
+          type="button"
+        >
           <span className="note-row-title">{note.title || '无标题笔记'}</span>
           <span className="note-row-meta">{formatDate(note.updatedAt)}</span>
         </button>
+        {note.parentId ? (
+          <button
+            className="note-keyboard-move"
+            type="button"
+            onClick={() => onPromoteToTopic(note)}
+            aria-label={`将${note.title || '笔记'}移到主题根级`}
+            title="移到主题根级（Alt+Home）"
+          >
+            移到根级
+          </button>
+        ) : null}
         <GripVertical className="drag-handle" size={14} />
       </div>
       <div className={`note-drop-line ${activeDrop === 'after' ? 'active' : ''}`} style={{ marginLeft: `${depth * 14 + 26}px` }} />
@@ -652,6 +807,7 @@ function NoteTreeItem({
               onDragEnd={onDragEnd}
               onDropTargetChange={onDropTargetChange}
               onFinishDrop={onFinishDrop}
+              onPromoteToTopic={onPromoteToTopic}
             />
           ))}
         </div>
