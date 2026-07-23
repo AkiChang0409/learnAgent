@@ -7,6 +7,7 @@ type NoteMode = 'read' | 'write' | 'structure';
 
 export function NoteEditor({
   note,
+  subjectOptions,
   onChange,
   onDelete,
   onAddSection,
@@ -16,6 +17,7 @@ export function NoteEditor({
   onUpdateList
 }: {
   note: Note | null;
+  subjectOptions: string[];
   onChange: (patch: Partial<Note>) => void;
   onDelete: () => void;
   onAddSection: () => void;
@@ -69,6 +71,7 @@ export function NoteEditor({
       {mode === 'write' && (
         <WritingView
           note={note}
+          subjectOptions={subjectOptions}
           onChange={onChange}
           onAddSection={onAddSection}
           onUpdateSection={onUpdateSection}
@@ -77,6 +80,7 @@ export function NoteEditor({
       {mode === 'structure' && (
         <StructureView
           note={note}
+          subjectOptions={subjectOptions}
           onChange={onChange}
           onAddSection={onAddSection}
           onUpdateSection={onUpdateSection}
@@ -152,11 +156,13 @@ function ReadList({ title, values }: { title: string; values: string[] }) {
 
 function WritingView({
   note,
+  subjectOptions,
   onChange,
   onAddSection,
   onUpdateSection
 }: {
   note: Note;
+  subjectOptions: string[];
   onChange: (patch: Partial<Note>) => void;
   onAddSection: () => void;
   onUpdateSection: (sectionId: string, patch: Partial<NoteSection>) => void;
@@ -165,7 +171,11 @@ function WritingView({
     <div className="writing-view">
       <input className="title-input writing-title" value={note.title} onChange={(event) => onChange({ title: event.target.value })} />
       <div className="writing-meta">
-        <input value={note.subject} onChange={(event) => onChange({ subject: event.target.value })} placeholder="学科" />
+        <select value={note.subject} onChange={(event) => onChange({ subject: event.target.value })} aria-label="学科">
+          {subjectOptions.map((subject) => (
+            <option key={subject} value={subject}>{subject}</option>
+          ))}
+        </select>
         <input value={note.topic} onChange={(event) => onChange({ topic: event.target.value })} placeholder="主题" />
       </div>
       <input
@@ -210,6 +220,7 @@ function WritingView({
 
 function StructureView({
   note,
+  subjectOptions,
   onChange,
   onAddSection,
   onUpdateSection,
@@ -218,6 +229,7 @@ function StructureView({
   onUpdateList
 }: {
   note: Note;
+  subjectOptions: string[];
   onChange: (patch: Partial<Note>) => void;
   onAddSection: () => void;
   onUpdateSection: (sectionId: string, patch: Partial<NoteSection>) => void;
@@ -232,7 +244,11 @@ function StructureView({
       <div className="field-grid">
         <label>
           <span>学科</span>
-          <input value={note.subject} onChange={(event) => onChange({ subject: event.target.value })} />
+          <select value={note.subject} onChange={(event) => onChange({ subject: event.target.value })}>
+            {subjectOptions.map((subject) => (
+              <option key={subject} value={subject}>{subject}</option>
+            ))}
+          </select>
         </label>
         <label>
           <span>主题</span>

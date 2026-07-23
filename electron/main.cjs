@@ -1894,8 +1894,9 @@ function createSyncPackage(data) {
     app: 'LearnAgent',
     packageVersion: 1,
     exportedAt: new Date().toISOString(),
-    schemaVersion: data?.schemaVersion || 3,
+    schemaVersion: data?.schemaVersion || 4,
     data: {
+      subjects: data?.subjects || [],
       notes: (data?.notes || []).map(stripSearchFields),
       conversations: data?.conversations || [],
       usageRecords: data?.usageRecords || [],
@@ -1910,6 +1911,7 @@ function createSyncPackage(data) {
 function readSyncPayload(value) {
   const source = value?.data && typeof value.data === 'object' ? value.data : value;
   return {
+    subjects: Array.isArray(source?.subjects) ? source.subjects : [],
     notes: Array.isArray(source?.notes) ? source.notes.map(stripSearchFields) : [],
     conversations: Array.isArray(source?.conversations) ? source.conversations : [],
     usageRecords: Array.isArray(source?.usageRecords) ? source.usageRecords : [],
@@ -1976,6 +1978,7 @@ function fixNoteHierarchy(notes) {
 
 function mergeSyncData(currentData, importPayload) {
   const incoming = readSyncPayload(importPayload);
+  const subjectMerge = mergeByUpdatedAt(currentData.subjects || [], incoming.subjects);
   const notesMerge = mergeByUpdatedAt(currentData.notes || [], incoming.notes);
   const notes = fixNoteHierarchy(notesMerge.items);
   const noteIds = new Set(notes.map((note) => note.id));
@@ -1987,6 +1990,7 @@ function mergeSyncData(currentData, importPayload) {
   return {
     data: {
       ...currentData,
+      subjects: subjectMerge.items,
       notes,
       conversations,
       usageRecords: usageMerge.items,
@@ -2001,6 +2005,8 @@ function mergeSyncData(currentData, importPayload) {
     summary: {
       notesAdded: notesMerge.added,
       notesUpdated: notesMerge.updated,
+      subjectsAdded: subjectMerge.added,
+      subjectsUpdated: subjectMerge.updated,
       conversationsAdded: conversationMerge.added,
       conversationsUpdated: conversationMerge.updated,
       usageRecordsAdded: usageMerge.added
@@ -2034,6 +2040,7 @@ ipcMain.handle('sync:export-package', async (event) => {
     canceled: false,
     filePath: result.filePath,
     summary: {
+      subjects: syncPackage.data.subjects.length,
       notes: syncPackage.data.notes.length,
       conversations: syncPackage.data.conversations.length,
       usageRecords: syncPackage.data.usageRecords.length

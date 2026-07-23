@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type { AppData, Conversation, MarkdownImportProgress, Note } from '../types';
-import { createId, markdownDraftToNotes, nowIso, subjectKnowledgeMapToNotes } from '../services/notes';
+import { cleanSubjectName, createId, ensureSubjects, markdownDraftToNotes, nowIso, subjectKnowledgeMapToNotes } from '../services/notes';
 
 type SetAppData = Dispatch<SetStateAction<AppData>>;
 type ToastType = 'success' | 'error' | 'info';
@@ -96,11 +96,11 @@ export function useKnowledgeImport({
         updatedAt: nowIso()
       });
 
-      const subject = result.knowledgeMap?.subject || firstNote.subject || selectedSubject || '通用学习';
+      const subject = cleanSubjectName(selectedSubject || result.knowledgeMap?.subject || firstNote.subject);
       const now = nowIso();
       const stampedNotes = importedNotes.map((note) => ({
         ...note,
-        subject: note.subject || subject,
+        subject: selectedSubject ? subject : cleanSubjectName(note.subject || subject),
         topic: note.topic || note.title || '未命名主题',
         updatedAt: now
       }));
@@ -134,6 +134,10 @@ export function useKnowledgeImport({
 
         return {
           ...current,
+          subjects: ensureSubjects({
+            subjects: current.subjects || [],
+            notes: [...positionedNotes, ...current.notes]
+          }),
           notes: [
             ...positionedNotes,
             ...current.notes

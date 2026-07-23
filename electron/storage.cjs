@@ -1,12 +1,15 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const initSqlJs = require('sql.js');
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
+const DEFAULT_SUBJECT_NAME = '通用学习';
 
 function defaultData() {
   return {
     schemaVersion: SCHEMA_VERSION,
+    subjects: [],
     notes: [],
     conversations: [],
     usageRecords: [],
@@ -55,6 +58,14 @@ function createStorage(userDataPath) {
       CREATE TABLE IF NOT EXISTS settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         data TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS subjects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS notes (
@@ -185,6 +196,7 @@ function createStorage(userDataPath) {
     const data = defaultData();
     data.settings = readSettings();
     data.notes = readNotes(noteIds);
+    data.subjects = noteIds ? readSubjectsForNotes(data.notes) : readSubjects(data.notes);
     data.conversations = readConversations(noteIds);
     data.usageRecords = readUsageRecords();
     return data;
@@ -201,6 +213,7 @@ function createStorage(userDataPath) {
     const merged = {
       ...defaultData(),
       ...data,
+      subjects: normalizeSubjects(data),
       settings: { ...defaultData().settings, ...data?.settings }
     };
     db.run('BEGIN TRANSACTION');
@@ -209,9 +222,14 @@ function createStorage(userDataPath) {
       db.run('DELETE FROM conversations');
       db.run('DELETE FROM note_sections');
       db.run('DELETE FROM notes');
+      db.run('DELETE FROM subjects');
       db.run('DELETE FROM usage_records');
       db.run('UPDATE settings SET data = ? WHERE id = 1', [JSON.stringify(merged.settings)]);
 
+      const insertSubject = db.prepare(`
+        INSERT INTO subjects (id, name, description, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
       const insertNote = db.prepare(`
         INSERT INTO notes (
           id, parent_note_id, position, title, subject, topic, tags, summary, cases_json,
@@ -238,6 +256,16 @@ function createStorage(userDataPath) {
           price_source, response_id
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
+
+      for (const subject of merged.subjects || []) {
+        insertSubject.run([
+          subject.id,
+          subject.name,
+          subject.description || '',
+          subject.createdAt,
+          subject.updatedAt
+        ]);
+      }
 
       for (const note of merged.notes || []) {
         insertNote.run([
@@ -303,6 +331,7 @@ function createStorage(userDataPath) {
         ]);
       }
 
+      insertSubject.free();
       insertNote.free();
       insertSection.free();
       insertConversation.free();
@@ -395,6 +424,25 @@ function createStorage(userDataPath) {
     const row = queryRows('SELECT data FROM settings WHERE id = 1')[0];
     if (!row) return defaultData().settings;
     return { ...defaultData().settings, ...safeParse(row.data, {}) };
+  }
+
+  function readSubjects(notes = []) {
+    const rows = queryRows('SELECT * FROM subjects ORDER BY updated_at DESC, name ASC');
+    if (!rows.length) return inferSubjectsFromNotes(notes);
+    return normalizeSubjects({
+      subjects: rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        description: row.description || '',
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      })),
+      notes
+    });
+  }
+
+  function readSubjectsForNotes(notes = []) {
+    return normalizeSubjects({ subjects: [], notes });
   }
 
   function readNotes(noteIds = null) {
@@ -681,6 +729,54 @@ function safeParse(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function createSubjectId() {
+  return `subject_${randomUUID()}`;
+}
+
+function cleanSubjectName(value) {
+  return String(value || '').trim() || DEFAULT_SUBJECT_NAME;
+}
+
+function normalizeSubjects(data) {
+  const now = new Date().toISOString();
+  const byName = new Map();
+
+  (data?.subjects || []).forEach((subject) => {
+    const name = cleanSubjectName(subject?.name);
+    const key = name.toLowerCase();
+    if (byName.has(key)) return;
+    byName.set(key, {
+      id: subject?.id || createSubjectId(),
+      name,
+      description: subject?.description || '',
+      createdAt: subject?.createdAt || subject?.created_at || now,
+      updatedAt: subject?.updatedAt || subject?.updated_at || subject?.createdAt || now
+    });
+  });
+
+  (data?.notes || []).forEach((note) => {
+    const name = cleanSubjectName(note?.subject);
+    const key = name.toLowerCase();
+    if (byName.has(key)) return;
+    byName.set(key, {
+      id: createSubjectId(),
+      name,
+      description: '',
+      createdAt: note?.createdAt || now,
+      updatedAt: note?.updatedAt || note?.createdAt || now
+    });
+  });
+
+  return Array.from(byName.values()).sort((a, b) => {
+    const updatedDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    return updatedDiff || String(a.name).localeCompare(String(b.name), 'zh-CN');
+  });
+}
+
+function inferSubjectsFromNotes(notes = []) {
+  return normalizeSubjects({ subjects: [], notes });
 }
 
 function escapeSql(value) {

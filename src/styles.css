@@ -105,6 +105,34 @@ textarea {
   gap: 10px;
 }
 
+.subject-create-panel {
+  max-width: 1120px;
+  margin: -8px auto 22px;
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(280px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d8d0c2;
+  border-radius: 8px;
+  background: #fffdf8;
+  box-shadow: 0 12px 28px rgba(71, 61, 42, 0.06);
+}
+
+.subject-create-panel div {
+  display: grid;
+  gap: 4px;
+}
+
+.subject-create-panel strong {
+  font-size: 15px;
+}
+
+.subject-create-panel input {
+  height: 38px;
+  padding: 0 12px;
+}
+
 .subject-card-grid {
   max-width: 1120px;
   margin: 0 auto;
@@ -114,14 +142,13 @@ textarea {
 }
 
 .subject-card {
+  position: relative;
   min-height: 178px;
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
-  gap: 12px;
-  text-align: left;
+  display: flex;
+  flex-direction: column;
   border: 1px solid #d8d0c2;
   border-radius: 8px;
-  padding: 16px;
+  padding: 0;
   color: #23231f;
   background: #fffdf8;
   box-shadow: 0 12px 28px rgba(71, 61, 42, 0.07);
@@ -130,6 +157,60 @@ textarea {
 .subject-card:hover {
   border-color: #b6d8d2;
   transform: translateY(-1px);
+}
+
+.subject-card-main {
+  width: 100%;
+  min-height: 176px;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 12px;
+  text-align: left;
+  border: 0;
+  border-radius: 8px;
+  padding: 16px;
+  color: inherit;
+  background: transparent;
+}
+
+.subject-card-actions {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 7px;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.subject-card:hover .subject-card-actions,
+.subject-card:focus-within .subject-card-actions {
+  opacity: 1;
+}
+
+.subject-card-actions .icon-button {
+  width: 32px;
+  height: 32px;
+  background: rgba(255, 253, 248, 0.94);
+}
+
+.subject-edit-form {
+  min-height: 176px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 16px;
+}
+
+.subject-edit-form input {
+  height: 40px;
+  padding: 0 12px;
+  font-weight: 800;
+}
+
+.subject-edit-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .subject-card-icon {
@@ -887,6 +968,7 @@ textarea {
 }
 
 .writing-meta input,
+.writing-meta select,
 .tag-input-soft,
 .writing-section input {
   height: 38px;
@@ -895,6 +977,7 @@ textarea {
 }
 
 .writing-meta input:focus,
+.writing-meta select:focus,
 .tag-input-soft:focus,
 .writing-section input:focus {
   border-color: #b6d8d2;

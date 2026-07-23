@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AppData } from '../types';
-import { emptyData } from '../services/notes';
+import { emptyData, ensureSubjects } from '../services/notes';
 
 export function useAppData() {
   const [data, setData] = useState<AppData>(emptyData);
@@ -17,6 +17,10 @@ export function useAppData() {
         const merged: AppData = {
           ...emptyData,
           ...loaded,
+          subjects: ensureSubjects({
+            subjects: loaded.subjects || [],
+            notes: loaded.notes || []
+          }),
           usageRecords: loaded.usageRecords || [],
           settings: { ...emptyData.settings, ...loaded.settings }
         };

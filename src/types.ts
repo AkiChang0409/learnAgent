@@ -64,6 +64,14 @@ export interface Note {
   searchScore?: number;
 }
 
+export interface Subject {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -85,6 +93,7 @@ export interface Conversation {
 
 export interface AppData {
   schemaVersion?: number;
+  subjects: Subject[];
   notes: Note[];
   conversations: Conversation[];
   usageRecords: TokenUsageRecord[];
@@ -323,6 +332,7 @@ export interface SyncExportResult {
   canceled?: boolean;
   filePath?: string;
   summary?: {
+    subjects: number;
     notes: number;
     conversations: number;
     usageRecords: number;
@@ -335,6 +345,8 @@ export interface SyncImportResult {
   filePath?: string;
   data?: AppData;
   summary?: {
+    subjectsAdded: number;
+    subjectsUpdated: number;
     notesAdded: number;
     notesUpdated: number;
     conversationsAdded: number;

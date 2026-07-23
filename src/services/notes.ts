@@ -1,7 +1,10 @@
-import type { AppData, GeneratedNoteDraft, MarkdownImportNoteDraft, Note, SubjectKnowledgeMap } from '../types';
+import type { AppData, GeneratedNoteDraft, MarkdownImportNoteDraft, Note, Subject, SubjectKnowledgeMap } from '../types';
+
+export const DEFAULT_SUBJECT_NAME = '通用学习';
 
 export const emptyData: AppData = {
-  schemaVersion: 3,
+  schemaVersion: 4,
+  subjects: [],
   notes: [],
   conversations: [],
   usageRecords: [],
@@ -26,12 +29,52 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
+export function cleanSubjectName(value: string | undefined | null) {
+  return String(value || '').trim() || DEFAULT_SUBJECT_NAME;
+}
+
+export function ensureSubjects(data: Pick<AppData, 'subjects' | 'notes'>): Subject[] {
+  const byName = new Map<string, Subject>();
+  const now = nowIso();
+
+  (data.subjects || []).forEach((subject) => {
+    const name = cleanSubjectName(subject.name);
+    const key = name.toLowerCase();
+    if (byName.has(key)) return;
+    byName.set(key, {
+      id: subject.id || createId('subject'),
+      name,
+      description: subject.description || '',
+      createdAt: subject.createdAt || now,
+      updatedAt: subject.updatedAt || subject.createdAt || now
+    });
+  });
+
+  (data.notes || []).forEach((note) => {
+    const name = cleanSubjectName(note.subject);
+    const key = name.toLowerCase();
+    if (byName.has(key)) return;
+    byName.set(key, {
+      id: createId('subject'),
+      name,
+      description: '',
+      createdAt: note.createdAt || now,
+      updatedAt: note.updatedAt || note.createdAt || now
+    });
+  });
+
+  return Array.from(byName.values()).sort((a, b) => {
+    const updatedDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    return updatedDiff || a.name.localeCompare(b.name, 'zh-CN');
+  });
+}
+
 export function draftToNote(draft: GeneratedNoteDraft): Note {
   const now = nowIso();
   return {
     id: createId('note'),
     title: draft.title || draft.topic || '未命名笔记',
-    subject: draft.subject || '通用学习',
+    subject: cleanSubjectName(draft.subject),
     topic: draft.topic || draft.title || '未命名主题',
     tags: normalizeList(draft.tags),
     summary: draft.summary || '',

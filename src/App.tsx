@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BookOpen, ChevronRight, FileText, Loader2, Settings, Upload } from 'lucide-react';
+import { BookOpen, Check, ChevronRight, Edit3, Loader2, Plus, Settings, Trash2, Upload, X } from 'lucide-react';
 import type {
   AiSettings,
   ChatMessage,
@@ -7,6 +7,7 @@ import type {
   Note,
   NoteDistillationPatch,
   NoteSection,
+  Subject,
   TokenUsageRecord
 } from './types';
 import { ChatPanel } from './components/ChatPanel';
@@ -20,7 +21,7 @@ import { useAppData } from './hooks/useAppData';
 import { useAutosave } from './hooks/useAutosave';
 import { useKnowledgeImport } from './hooks/useKnowledgeImport';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
-import { createId, draftToNote, formatDate, nowIso } from './services/notes';
+import { cleanSubjectName, createId, draftToNote, ensureSubjects, formatDate, nowIso } from './services/notes';
 import { retrieveContext } from './services/rag';
 
 function errorMessage(error: unknown) {
@@ -34,7 +35,9 @@ const RECENT_HISTORY_MESSAGE_LIMIT = 6;
 type NoteDropPlacement = 'before' | 'inside' | 'after' | 'root' | 'topic';
 
 interface SubjectSummary {
-  subject: string;
+  id: string;
+  name: string;
+  description: string;
   noteCount: number;
   topicCount: number;
   latestUpdatedAt: string;
@@ -54,6 +57,9 @@ export default function App() {
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [newSubjectName, setNewSubjectName] = useState('');
+  const [editingSubjectId, setEditingSubjectId] = useState<string | null>(null);
+  const [editingSubjectName, setEditingSubjectName] = useState('');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const pushToast = useCallback((type: ToastMessage['type'], message: string) => {
@@ -85,20 +91,24 @@ export default function App() {
   );
 
   const subjectSummaries = useMemo(() => {
+    const subjects = ensureSubjects({ subjects: data.subjects || [], notes: data.notes || [] });
     const groups = new Map<string, Note[]>();
     data.notes.forEach((note) => {
-      const subject = note.subject.trim() || '通用学习';
+      const subject = cleanSubjectName(note.subject);
       groups.set(subject, [...(groups.get(subject) || []), note]);
     });
 
-    return Array.from(groups.entries())
-      .map(([subject, notes]): SubjectSummary => {
+    return subjects
+      .map((subject): SubjectSummary => {
+        const notes = groups.get(subject.name) || [];
         const latestUpdatedAt = notes
           .map((note) => note.updatedAt)
-          .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || nowIso();
+          .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || subject.updatedAt;
         const topics = Array.from(new Set(notes.map((note) => note.topic.trim() || '未命名主题')));
         return {
-          subject,
+          id: subject.id,
+          name: subject.name,
+          description: subject.description || '',
           noteCount: notes.length,
           topicCount: topics.length,
           latestUpdatedAt,
@@ -106,18 +116,25 @@ export default function App() {
         };
       })
       .sort((a, b) => new Date(b.latestUpdatedAt).getTime() - new Date(a.latestUpdatedAt).getTime());
-  }, [data.notes]);
+  }, [data.notes, data.subjects]);
+
+  const subjectOptions = useMemo(() => subjectSummaries.map((subject) => subject.name), [subjectSummaries]);
 
   const selectedSubjectNotes = useMemo(
-    () => selectedSubject ? data.notes.filter((note) => (note.subject.trim() || '通用学习') === selectedSubject) : [],
+    () => selectedSubject ? data.notes.filter((note) => cleanSubjectName(note.subject) === selectedSubject) : [],
     [data.notes, selectedSubject]
   );
 
   useEffect(() => {
     if (!selectedSubject) return;
-    const notes = data.notes.filter((note) => (note.subject.trim() || '通用学习') === selectedSubject);
-    if (!notes.length) {
+    const notes = data.notes.filter((note) => cleanSubjectName(note.subject) === selectedSubject);
+    const subjectExists = subjectSummaries.some((subject) => subject.name === selectedSubject);
+    if (!subjectExists && !notes.length) {
       setSelectedSubject(null);
+      setSelectedNoteId('');
+      return;
+    }
+    if (!notes.length) {
       setSelectedNoteId('');
       return;
     }
@@ -156,7 +173,7 @@ export default function App() {
     const query = noteSearch.trim().toLowerCase();
     if (!selectedSubject) return [];
     if (!query) return selectedSubjectNotes;
-    return searchResults.filter((note) => (note.subject.trim() || '通用学习') === selectedSubject);
+    return searchResults.filter((note) => cleanSubjectName(note.subject) === selectedSubject);
   }, [noteSearch, searchResults, selectedSubject, selectedSubjectNotes]);
 
   const { importMarkdown, isImportingMarkdown, importProgress } = useKnowledgeImport({
@@ -175,6 +192,126 @@ export default function App() {
       ...current,
       usageRecords: [...(current.usageRecords || []), record].slice(-1000)
     }));
+  }
+
+  function subjectExists(name: string, excludeId = '') {
+    const cleanName = cleanSubjectName(name).toLowerCase();
+    return (data.subjects || []).some(
+      (subject) => subject.id !== excludeId && cleanSubjectName(subject.name).toLowerCase() === cleanName
+    );
+  }
+
+  function upsertSubject(subjects: Subject[], name: string, updatedAt = nowIso()) {
+    const cleanName = cleanSubjectName(name);
+    const existing = subjects.find((subject) => cleanSubjectName(subject.name).toLowerCase() === cleanName.toLowerCase());
+    if (existing) {
+      return subjects.map((subject) =>
+        subject.id === existing.id
+          ? { ...subject, name: cleanName, updatedAt: subject.updatedAt || updatedAt }
+          : subject
+      );
+    }
+    return [
+      {
+        id: createId('subject'),
+        name: cleanName,
+        description: '',
+        createdAt: updatedAt,
+        updatedAt
+      },
+      ...subjects
+    ];
+  }
+
+  function createSubject() {
+    const name = newSubjectName.trim();
+    if (!name) {
+      pushToast('error', '请输入学科名称');
+      return;
+    }
+    if (subjectExists(name)) {
+      pushToast('error', '这个学科已经存在');
+      return;
+    }
+    const now = nowIso();
+    const cleanName = cleanSubjectName(name);
+    setData((current) => ({
+      ...current,
+      subjects: [
+        {
+          id: createId('subject'),
+          name: cleanName,
+          description: '',
+          createdAt: now,
+          updatedAt: now
+        },
+        ...(current.subjects || [])
+      ]
+    }));
+    setNewSubjectName('');
+    setSelectedSubject(cleanName);
+    setSelectedNoteId('');
+    setNoteSearch('');
+    pushToast('success', '已创建学科');
+  }
+
+  function startRenamingSubject(subject: SubjectSummary) {
+    setEditingSubjectId(subject.id);
+    setEditingSubjectName(subject.name);
+  }
+
+  function cancelRenamingSubject() {
+    setEditingSubjectId(null);
+    setEditingSubjectName('');
+  }
+
+  function renameSubject(subject: SubjectSummary) {
+    const nextName = editingSubjectName.trim();
+    if (!nextName) {
+      pushToast('error', '请输入学科名称');
+      return;
+    }
+    if (subjectExists(nextName, subject.id)) {
+      pushToast('error', '这个学科已经存在');
+      return;
+    }
+    const cleanName = cleanSubjectName(nextName);
+    const renamedAt = nowIso();
+    setData((current) => ({
+      ...current,
+      subjects: (current.subjects || []).map((item) =>
+        item.id === subject.id ? { ...item, name: cleanName, updatedAt: renamedAt } : item
+      ),
+      notes: current.notes.map((note) =>
+        cleanSubjectName(note.subject) === subject.name
+          ? { ...note, subject: cleanName, updatedAt: renamedAt }
+          : note
+      )
+    }));
+    if (selectedSubject === subject.name) setSelectedSubject(cleanName);
+    cancelRenamingSubject();
+    pushToast('success', '学科已重命名');
+  }
+
+  function deleteSubject(subject: SubjectSummary) {
+    if (subject.noteCount > 0) {
+      const confirmed = window.confirm(`删除“${subject.name}”会同时删除 ${subject.noteCount} 篇笔记及相关对话。确定继续？`);
+      if (!confirmed) return;
+    }
+    const noteIds = new Set(data.notes.filter((note) => cleanSubjectName(note.subject) === subject.name).map((note) => note.id));
+    setData((current) => ({
+      ...current,
+      subjects: (current.subjects || []).filter((item) => item.id !== subject.id),
+      notes: current.notes.filter((note) => cleanSubjectName(note.subject) !== subject.name),
+      conversations: current.conversations.filter((conversation) => !noteIds.has(conversation.noteId))
+    }));
+    if (selectedSubject === subject.name) {
+      setSelectedSubject(null);
+      setSelectedNoteId('');
+      setNoteSearch('');
+    }
+    if (editingSubjectId === subject.id) cancelRenamingSubject();
+    pushToast('info', subject.noteCount > 0 ? '学科和笔记已删除' : '学科已删除');
   }
 
   function noteSortValue(note: Note) {
@@ -246,6 +383,30 @@ export default function App() {
     }));
   }
 
+  function updateSelectedNotePatch(patch: Partial<Note>) {
+    if (!selectedNoteId) return;
+    const nextSubject = patch.subject === undefined ? null : cleanSubjectName(patch.subject);
+    const updatedAt = nowIso();
+    setData((current) => ({
+      ...current,
+      subjects: nextSubject ? upsertSubject(current.subjects || [], nextSubject, updatedAt) : current.subjects,
+      notes: current.notes.map((note) =>
+        note.id === selectedNoteId
+          ? {
+              ...note,
+              ...patch,
+              subject: nextSubject || note.subject,
+              updatedAt
+            }
+          : note
+      )
+    }));
+    if (nextSubject) {
+      setSelectedSubject(nextSubject);
+      setNoteSearch('');
+    }
+  }
+
   async function generateNote() {
     const input = composer.trim();
     if (!input || isGenerating) return;
@@ -253,7 +414,7 @@ export default function App() {
     try {
       const result = await window.learnAgent.generateNote({ input, settings: data.settings });
       const draftNote = draftToNote(result.draft);
-      const subject = selectedSubject || draftNote.subject || '通用学习';
+      const subject = cleanSubjectName(selectedSubject || draftNote.subject);
       const topic = draftNote.topic || '未命名主题';
       const note = { ...draftNote, subject, topic };
       const conversation = {
@@ -265,6 +426,7 @@ export default function App() {
       };
       setData((current) => ({
         ...current,
+        subjects: upsertSubject(current.subjects || [], subject, note.updatedAt),
         notes: [
           { ...note, position: rootNotePosition(current.notes, subject, topic) },
           ...current.notes
@@ -285,7 +447,7 @@ export default function App() {
 
   function createBlankNote() {
     const now = nowIso();
-    const subject = selectedSubject || '通用学习';
+    const subject = cleanSubjectName(selectedSubject);
     const topic = '未命名主题';
     const note: Note = {
       id: createId('note'),
@@ -304,6 +466,7 @@ export default function App() {
     };
     setData((current) => ({
       ...current,
+      subjects: upsertSubject(current.subjects || [], subject, now),
       notes: [note, ...current.notes],
       conversations: [
         { id: createId('conversation'), noteId: note.id, title: note.title, messages: [], updatedAt: now },
@@ -318,6 +481,7 @@ export default function App() {
   function deleteSelectedNote() {
     if (!selectedNote) return;
     const remaining = data.notes.filter((note) => note.id !== selectedNote.id);
+    const remainingInSubject = remaining.filter((note) => cleanSubjectName(note.subject) === cleanSubjectName(selectedNote.subject));
     const promotedParentId = selectedNote.parentId;
     setData((current) => ({
       ...current,
@@ -328,7 +492,7 @@ export default function App() {
       ),
       conversations: current.conversations.filter((conversation) => conversation.noteId !== selectedNote.id)
     }));
-    setSelectedNoteId(remaining[0]?.id || '');
+    setSelectedNoteId(remainingInSubject[0]?.id || '');
     pushToast('info', '笔记已删除');
   }
 
@@ -744,7 +908,13 @@ export default function App() {
         pushToast('error', '导入同步包失败');
         return;
       }
-      setData(result.data);
+      setData({
+        ...result.data,
+        subjects: ensureSubjects({
+          subjects: result.data.subjects || [],
+          notes: result.data.notes || []
+        })
+      });
       setSelectedSubject(null);
       setSelectedNoteId('');
       setNoteSearch('');
@@ -752,7 +922,7 @@ export default function App() {
       pushToast(
         'success',
         summary
-          ? `已合并：新增 ${summary.notesAdded} 篇，更新 ${summary.notesUpdated} 篇`
+          ? `已合并：新增 ${summary.subjectsAdded} 个学科、${summary.notesAdded} 篇笔记`
           : '已导入并合并同步包'
       );
     } catch (error) {
@@ -771,7 +941,7 @@ export default function App() {
   }
 
   function enterSubject(subject: string) {
-    const notes = data.notes.filter((note) => (note.subject.trim() || '通用学习') === subject);
+    const notes = data.notes.filter((note) => cleanSubjectName(note.subject) === subject);
     setSelectedSubject(subject);
     setNoteSearch('');
     setSelectedNoteId(notes[0]?.id || '');
@@ -784,7 +954,7 @@ export default function App() {
           <div>
             <span className="eyebrow">LearnAgent</span>
             <h1>学科</h1>
-            <p>{data.notes.length ? `${subjectSummaries.length} 个学科 · ${data.notes.length} 篇笔记` : '还没有笔记，先创建一个学科入口。'}</p>
+            <p>{subjectSummaries.length ? `${subjectSummaries.length} 个学科 · ${data.notes.length} 篇笔记` : '先创建学科，再导入资料或生成笔记。'}</p>
           </div>
           <div className="subject-home-actions">
             <button className="secondary-action" onClick={() => setShowSettings(true)} type="button">
@@ -795,42 +965,100 @@ export default function App() {
               {isImportingMarkdown ? <Loader2 className="spin" size={16} /> : <Upload size={16} />}
               导入 MD
             </button>
-            <button className="primary-action" onClick={createBlankNote} type="button">
-              <FileText size={16} />
-              新笔记
-            </button>
           </div>
         </header>
         <ImportProgressPanel progress={importProgress} />
 
+        <form
+          className="subject-create-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            createSubject();
+          }}
+        >
+          <div>
+            <span className="eyebrow">New Subject</span>
+            <strong>初始化学科空间</strong>
+          </div>
+          <input
+            value={newSubjectName}
+            onChange={(event) => setNewSubjectName(event.target.value)}
+            placeholder="输入学科名称，例如：操作系统、数据结构、项目复盘"
+          />
+          <button className="primary-action" type="submit" disabled={!newSubjectName.trim()}>
+            <Plus size={16} />
+            新建学科
+          </button>
+        </form>
+
         {subjectSummaries.length ? (
           <section className="subject-card-grid" aria-label="学科列表">
             {subjectSummaries.map((subject) => (
-              <button className="subject-card" key={subject.subject} onClick={() => enterSubject(subject.subject)} type="button">
-                <div className="subject-card-icon">
-                  <BookOpen size={22} />
-                </div>
-                <div>
-                  <h2>{subject.subject}</h2>
-                  <p>{subject.topicCount} 个主题 · {subject.noteCount} 篇笔记</p>
-                </div>
-                <div className="subject-topic-preview">
-                  {subject.sampleTopics.map((topic) => (
-                    <span key={topic}>{topic}</span>
-                  ))}
-                </div>
-                <div className="subject-card-footer">
-                  <span>最近更新 {formatDate(subject.latestUpdatedAt)}</span>
-                  <ChevronRight size={18} />
-                </div>
-              </button>
+              <article className="subject-card" key={subject.id}>
+                {editingSubjectId === subject.id ? (
+                  <form
+                    className="subject-edit-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      renameSubject(subject);
+                    }}
+                  >
+                    <input
+                      value={editingSubjectName}
+                      onChange={(event) => setEditingSubjectName(event.target.value)}
+                      aria-label="学科名称"
+                    />
+                    <div className="subject-edit-actions">
+                      <button className="icon-button" type="submit" title="保存" aria-label="保存">
+                        <Check size={16} />
+                      </button>
+                      <button className="icon-button" type="button" onClick={cancelRenamingSubject} title="取消" aria-label="取消">
+                        <X size={16} />
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <>
+                    <button className="subject-card-main" onClick={() => enterSubject(subject.name)} type="button">
+                      <div className="subject-card-icon">
+                        <BookOpen size={22} />
+                      </div>
+                      <div>
+                        <h2>{subject.name}</h2>
+                        <p>{subject.topicCount} 个主题 · {subject.noteCount} 篇笔记</p>
+                      </div>
+                      <div className="subject-topic-preview">
+                        {subject.sampleTopics.length ? (
+                          subject.sampleTopics.map((topic) => (
+                            <span key={topic}>{topic}</span>
+                          ))
+                        ) : (
+                          <span>待添加主题</span>
+                        )}
+                      </div>
+                      <div className="subject-card-footer">
+                        <span>{subject.noteCount ? `最近更新 ${formatDate(subject.latestUpdatedAt)}` : '空学科'}</span>
+                        <ChevronRight size={18} />
+                      </div>
+                    </button>
+                    <div className="subject-card-actions">
+                      <button className="icon-button" onClick={() => startRenamingSubject(subject)} type="button" title="重命名学科" aria-label="重命名学科">
+                        <Edit3 size={16} />
+                      </button>
+                      <button className="icon-button danger" onClick={() => deleteSubject(subject)} type="button" title="删除学科" aria-label="删除学科">
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </>
+                )}
+              </article>
             ))}
           </section>
         ) : (
           <section className="subject-empty">
             <BookOpen size={34} />
             <h2>暂无学科</h2>
-            <p>创建第一篇笔记后，会按“学科、主题、笔记”自动归档。</p>
+            <p>创建学科后，可以在学科内继续创建笔记、导入 Markdown 或生成知识总结。</p>
           </section>
         )}
 
@@ -894,7 +1122,8 @@ export default function App() {
 
         <NoteEditor
           note={selectedNote}
-          onChange={(patch) => updateSelectedNote((note) => ({ ...note, ...patch }))}
+          subjectOptions={subjectOptions}
+          onChange={updateSelectedNotePatch}
           onDelete={deleteSelectedNote}
           onAddSection={addSection}
           onUpdateSection={updateSection}
