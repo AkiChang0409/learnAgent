@@ -56,7 +56,7 @@ function createStorage(userDataPath) {
   function applyBatch(current, changes) {
     const entities = (items, change: any = {}) => {
       const deleted = new Set(change.deleteIds || []);
-      const byId = new Map(items.filter((item) => !deleted.has(item.id)).map((item) => [item.id, item]));
+      const byId = new Map<string, any>(items.filter((item) => !deleted.has(item.id)).map((item) => [item.id, item]));
       for (const item of change.upsert || []) byId.set(item.id, item);
       return Array.from(byId.values());
     };

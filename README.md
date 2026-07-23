@@ -97,6 +97,24 @@ npm run dist:win
 - schema v5/v6 迁移前会保存数据库备份；未 checkpoint journal 会在启动时重放，运行中的 Agent 任务会标记为 interrupted，不会自动发起新的付费调用。
 - 模型输出先经过 JSON/schema、Evidence ID 与层级归一化校验；导入文档按不可信数据隔离，远程 Endpoint 只允许 HTTPS，Ollama HTTP 只允许 loopback。
 
+详细文档：
+
+- [项目技术深度分析](./PROJECT_TECHNICAL_NOTES.md)：需求、架构、数据流、工程亮点、技术债、面试讲述和代码证据。
+- [多 Agent 编排设计](./AGENT_ORCHESTRATION_DESIGN.md)：Evidence、规划、写作、增强、校验和本地合并的设计与落地状态。
+
+## 本轮架构演进摘要
+
+- 数据接口从整库 `loadData/saveData` 迁移为 `loadSnapshot/applyChanges/flushData`，renderer 只传递带 baseRevision 的实体变更。
+- 常规保存由整库删除重写改成 affected-entity SQL；只重建发生变化的笔记 sections 和 chunks。
+- journal、checkpoint 和串行队列补齐连续 revision、崩溃重放以及 flush 失败重试语义。
+- Electron 主进程迁移到 `.cts` 模块，拆分窗口安全、IPC、密钥、Provider、Agent、同步和 Worker 存储边界。
+- `AiSettings` 不再持久化明文 API Key；旧密钥自动迁移到 `safeStorage`，renderer 只看到 `apiKeyConfigured`。
+- Markdown 导入新增快速、深度、离线模式，以及预检、取消、调用预算、Agent run/step 记录和不可信文档隔离。
+- 前端补齐空主题、学科切换、领域纯函数、模态框焦点锁定、键盘移动和保存失败重试。
+- 新增 Vitest/存储集成测试、Electron smoke、性能阈值和 gzip 包体预算，并接入发布 CI。
+
+上述能力已写入当前源码；最新一轮改动尚未执行测试、构建、基准或安装包验证，发布前必须让 CI 完整通过，不能仅依据本文档视为已验收。
+
 ## 模型配置
 
 应用内可选择三种 Provider：
@@ -189,8 +207,8 @@ git push origin --tags
 
 也可以手动创建 tag：
 ```powershell
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 ## 不应提交的内容
@@ -204,7 +222,6 @@ git push origin v1.0.2
 - `.claude/settings.local.json`
 - `.env`
 - `.env.*`
-- `PROJECT_TECHNICAL_NOTES.md`
 
 `release/` 是本地打包输出目录，不应进入 Git。安装包应通过 GitHub Release 附件分发。
 

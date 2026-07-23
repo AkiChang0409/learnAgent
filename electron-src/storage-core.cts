@@ -1200,7 +1200,7 @@ function escapeSql(value) {
 function applyChangeBatch(current, changes) {
   const applyEntities = (items, change: any = {}) => {
     const deleted = new Set(Array.isArray(change.deleteIds) ? change.deleteIds : []);
-    const byId = new Map(items.filter((item) => !deleted.has(item.id)).map((item) => [item.id, item]));
+    const byId = new Map<string, any>(items.filter((item) => !deleted.has(item.id)).map((item) => [item.id, item]));
     for (const item of Array.isArray(change.upsert) ? change.upsert : []) byId.set(item.id, item);
     return Array.from(byId.values());
   };

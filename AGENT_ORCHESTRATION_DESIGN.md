@@ -10,6 +10,25 @@
 > - 每个 Agent 的输入输出 schema
 > - 长输入处理、质量校验、失败重试和落库流程
 
+## 0. 当前实现状态（2026-07-23）
+
+本文最初是一份目标设计。当前代码已经落地主要闭环，以下状态说明优先于后文仍保留的历史“建议”措辞：
+
+| 设计项 | 当前实现 |
+| --- | --- |
+| 快速模式 | `document.ingestor` → `project.analysis-master` → `project.analysis-critic`，质量不合格时最多整体重写一次 |
+| 深度模式 | `document.ingestor` → `subject.orchestrator` → `topic.note-writer` → `note.enricher` → `knowledge.validator` → 本地 merger |
+| 离线模式 | Local Provider 自动使用零模型调用的标题/原文整理，并明确标记未做深度推理 |
+| Evidence 约束 | Evidence ID 在归一化时只接受已知集合；导入文档使用不可信数据分隔区 |
+| 输出校验 | 已有 JSON 提取、Agent 必需字段检查和结构归一化；当前尚未引入统一 Zod/JSON Schema registry |
+| 运行控制 | 2MiB、160,000 字符、16 chunk、8 主题、每主题 2 篇核心笔记、并发度 3、每步最多重试一次、总调用预算 |
+| 任务记录 | schema v6 持久化 agent_runs/agent_steps，包括状态、尝试次数、输入/输出摘要、预计/实际调用数和 usageRecordId |
+| 取消与重启 | UI 可取消；启动把 running 标记为 interrupted，不自动产生新付费调用 |
+| Validator 重写 | 最多一次定向重写，不允许无限循环 |
+| Merger | 确定性本地代码合并，不额外调用模型 |
+
+当前仍未实现的完整设计能力：失败 chunk 的部分成功落库、从持久化中间 artifact 精确恢复某个 step、统一 schema registry、Evidence 引用 UI 和系统化 AI eval。用户可以重新选择文件人工重试，但这不等于从中断 step 续跑。
+
 ## 1. 设计目标
 
 当前 LearnAgent 已具备 Markdown 导入、知识抽取和知识整理能力，但如果输入变成完整开发日志、长篇项目复盘或多文件资料，单个 Agent 很容易出现以下问题：
@@ -722,10 +741,10 @@ type ValidatorOutput = ValidationReport;
 
 #### 运行建议
 
-- 第一版可把 validator 作为可选步骤。
+- 当前深度模式固定执行 validator；快速模式使用独立 `project.analysis-critic`。
 - 如果 `score >= 75` 且无 blocker，可以落库。
 - 如果存在 blocker，优先按 `rewriteTasks` 局部重跑。
-- 重试次数建议最多 1-2 次，避免无限循环和成本失控。
+- 当前只允许一次定向重写，避免无限循环和成本失控。
 
 ### 5.6 subject.merger
 
@@ -995,9 +1014,9 @@ Repair prompt：
 
 ### 9.2 单个 chunk 抽取失败
 
-- 重试当前 chunk。
-- 仍失败则记录 error step。
-- 如果失败 chunk 占比低，可以继续导入并在 coverageNotes 中说明。
+- 当前会对该 Agent step 最多重试一次，并记录 attempt/error。
+- 仍失败时整个导入任务标记 failed，不会静默跳过证据块。
+- “低比例失败时部分成功导入”仍是后续方向，需要先持久化 EvidenceBatch 并让用户确认是否接受缺口。
 
 ### 9.3 Writer 输出泛化
 
@@ -1029,12 +1048,12 @@ Repair prompt：
 - Orchestrator 只运行一次。
 - Writer / enricher 可按任务运行，但限制最大 note 数。
 - Validator 可配置开关。
-- 重试最多 1-2 次。
+- 每个步骤最多重试一次，Validator 最多触发一次定向重写，并受总调用预算限制。
 - 本地 fallback 不进入高质量导入，只作为可运行兜底。
 
 ## 10. Job Step 记录
 
-为了让多 Agent 系统可调试，建议新增任务记录。
+当前 schema v6 已新增基础任务记录；下列结构保留为完整可观测模型的目标形态。
 
 ```ts
 interface AgentJob {
@@ -1071,9 +1090,9 @@ interface AgentJobStep {
 - 失败后可以局部重试。
 - 后续可以做质量评估和成本分析。
 
-## 11. 第一版实现范围
+## 11. 原始第一版范围与当前落地
 
-建议第一版先实现最小闭环：
+原始设计建议先实现最小闭环：
 
 ```text
 document.ingestor
@@ -1083,7 +1102,7 @@ document.ingestor
   -> 本地 merger
 ```
 
-Validator 可以先作为第二阶段加入。
+当前 Validator、并发度限制、取消、有限重试和基础 job 历史均已落地。
 
 第一版必做：
 
@@ -1096,13 +1115,13 @@ Validator 可以先作为第二阶段加入。
 - 基于 requiredEvidenceIds 构造 evidence pack。
 - 进度提示。
 
-第一版暂缓：
+当前仍暂缓或不完整：
 
 - 复杂语义去重。
-- 并发调度。
-- 自动重试多轮。
 - UI 展示 evidence 引用。
-- 长期 job 历史管理。
+- 中间 artifact 的长期历史与精确 step 恢复。
+- 失败 chunk 的部分成功导入。
+- 多轮自动重试（当前刻意限制为单次，避免成本失控）。
 
 ## 12. 质量标准
 

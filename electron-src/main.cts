@@ -134,6 +134,7 @@ function createAgentJobStep(runId, agentId, inputSummary) {
     runId,
     agentId,
     status: 'running',
+    attempt: 1,
     inputSummary: clipText(inputSummary, 1200),
     outputSummary: '',
     usageRecordId: '',

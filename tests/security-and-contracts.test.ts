@@ -102,6 +102,45 @@ describe('sync and import contracts', () => {
     expect(snapshot.data.settings).toEqual({ provider: 'openai-compatible', apiKeyConfigured: true });
   });
 
+  it('handles concurrent legacy key migrations as one idempotent load', async () => {
+    let snapshot = {
+      revision: 4,
+      data: { settings: { provider: 'openai-compatible', apiKey: 'legacy-secret' } }
+    };
+    const storage = {
+      loadSnapshot: vi.fn(async () => structuredClone(snapshot)),
+      applyChanges: vi.fn(async ({ baseRevision }: { baseRevision: number }) => {
+        await Promise.resolve();
+        if (baseRevision !== snapshot.revision) {
+          throw Object.assign(new Error(`数据版本冲突：期望 ${snapshot.revision}`), {
+            code: 'REVISION_CONFLICT',
+            revision: snapshot.revision
+          });
+        }
+        snapshot = {
+          revision: snapshot.revision + 1,
+          data: { settings: { provider: 'openai-compatible', apiKeyConfigured: true } }
+        };
+        return { revision: snapshot.revision, durable: true };
+      }),
+      flushData: vi.fn(async () => ({ revision: snapshot.revision, durable: true })),
+      loadData: vi.fn(async () => structuredClone(snapshot.data))
+    };
+    const secretStore = {
+      setApiKey: vi.fn().mockResolvedValue({ configured: true }),
+      isConfigured: vi.fn().mockResolvedValue(true)
+    };
+
+    const results = await Promise.all([
+      loadSafeSnapshot(storage, secretStore),
+      loadSafeSnapshot(storage, secretStore)
+    ]);
+
+    expect(results.map((result) => result.revision)).toEqual([5, 5]);
+    expect(results.every((result) => result.data.settings.apiKey === undefined)).toBe(true);
+    expect(storage.applyChanges).toHaveBeenCalledTimes(2);
+  });
+
   it('repairs orphaned parents and deterministic multi-node cycles', () => {
     const fixed = fixNoteHierarchy([
       { id: 'a', parentId: 'b' }, { id: 'b', parentId: 'a' }, { id: 'c', parentId: 'missing' }

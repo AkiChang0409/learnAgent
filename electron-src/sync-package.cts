@@ -63,7 +63,7 @@ function fixNoteHierarchy(notes) {
   const ids = new Set((notes || []).map((note) => note.id));
   const repaired = (notes || []).map((note) => (!note.parentId || note.parentId === note.id || !ids.has(note.parentId)
     ? { ...note, parentId: undefined } : { ...note }));
-  const byId = new Map(repaired.map((note) => [note.id, note]));
+  const byId = new Map<string, any>(repaired.map((note) => [note.id, note]));
   for (const start of byId.keys()) {
     const path = [];
     const seen = new Map();
