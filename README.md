@@ -143,10 +143,10 @@ git push origin --tags
 
 示例：
 
-- 当前版本：`0.2.1`
+- 当前版本：`1.0.1`
 - 执行：`npm version patch`
-- 新版本：`0.2.2`
-- 新 tag：`v0.2.2`
+- 新版本：`1.0.2`
+- 新 tag：`v1.0.2`
 - GitHub Release 附件：`LearnAgent-0.1.4-Setup.exe`
 
 也可以手动创建 tag：
