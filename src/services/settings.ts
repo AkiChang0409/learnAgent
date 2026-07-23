@@ -25,7 +25,9 @@ export function applyProviderPreset(current: AiSettings, provider: AiProvider): 
     provider,
     endpoint: preset.endpoint,
     model: preset.model,
-    apiKey: provider === 'openai-compatible' ? current.apiKey : preset.apiKey,
+    // 保留已填写的 API Key：切换 Provider 只重置 Endpoint/Model 到预设，
+    // 不应丢弃用户的密钥，否则切走再切回 openai-compatible 时 Key 会消失。
+    apiKey: current.apiKey,
     lastTestStatus: 'idle',
     lastTestMessage: '切换 Provider 后尚未测试连接',
     lastTestedAt: undefined
