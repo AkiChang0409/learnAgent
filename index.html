@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LearnAgent</title>
+    <script>
+      // Apply the last-used theme before React mounts to avoid a flash of the default palette.
+      (function () {
+        try {
+          var t = window.localStorage.getItem('learnagent-theme');
+          document.documentElement.setAttribute(
+            'data-theme',
+            t === 'dark' || t === 'minimal' ? t : 'paper'
+          );
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'paper');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

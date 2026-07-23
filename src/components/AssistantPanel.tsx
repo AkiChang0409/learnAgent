@@ -1,9 +1,10 @@
-import { Bot, Brain, Loader2, MessageSquare, NotebookPen } from 'lucide-react';
+import { Brain, Loader2, MessageSquare, NotebookPen, Sparkles, X } from 'lucide-react';
 import type { ChatMessage, Conversation, Note } from '../types';
 import { modelStatusText, providerDisplayName } from '../services/settings';
 import type { AiSettings } from '../types';
 
-export function ChatPanel({
+export function AssistantPanel({
+  open,
   selectedNote,
   conversation,
   chatInput,
@@ -12,8 +13,10 @@ export function ChatPanel({
   settings,
   onChatInputChange,
   onAsk,
-  onDistillToNote
+  onDistillToNote,
+  onClose
 }: {
+  open: boolean;
   selectedNote: Note | null;
   conversation: Conversation | null;
   chatInput: string;
@@ -23,21 +26,28 @@ export function ChatPanel({
   onChatInputChange: (value: string) => void;
   onAsk: () => void;
   onDistillToNote: () => void;
+  onClose: () => void;
 }) {
   const messages = conversation?.messages || [];
   const hasMemory = Boolean(conversation?.memorySummary?.trim());
+  const statusClass = settings.provider === 'local' ? 'idle' : settings.lastTestStatus || 'idle';
 
   return (
-    <aside className="chat-panel">
-      <div className="panel-heading">
-        <div>
-          <span className="eyebrow">RAG Bot</span>
-          <h2>当前笔记对话</h2>
+    <aside className={`assistant ${open ? 'open' : ''}`} aria-hidden={!open}>
+      <div className="assistant-head">
+        <div className="assistant-title">
+          <Sparkles size={17} />
+          <div>
+            <strong>笔记助手</strong>
+            <span>{selectedNote ? selectedNote.title || '无标题笔记' : '未选择笔记'}</span>
+          </div>
         </div>
-        <Bot size={22} />
+        <button className="icon-button ghost" onClick={onClose} aria-label="收起助手" title="收起助手">
+          <X size={18} />
+        </button>
       </div>
 
-      <div className={`model-status ${settings.lastTestStatus || 'idle'}`}>
+      <div className={`model-status ${statusClass}`}>
         <strong>{providerDisplayName(settings.provider)}</strong>
         <span>{modelStatusText(settings)}</span>
       </div>
@@ -47,21 +57,24 @@ export function ChatPanel({
           <MessageBubble key={message.id} message={message} />
         ))}
         {isAsking && (
-          <article className="message assistant pending">
+          <article className="message assistant-msg pending">
             <Loader2 className="spin" size={16} />
             <span>思考中</span>
           </article>
         )}
-        {!messages.length && (
+        {!messages.length && !isAsking && (
           <div className="chat-empty">
-            <MessageSquare size={28} />
-            <span>围绕当前笔记提问，Bot 会引用相关片段回答。</span>
+            <MessageSquare size={26} />
+            <span>围绕这篇笔记提问，助手会引用相关片段作答。</span>
           </div>
         )}
       </div>
 
       <div className="chat-tools">
-        <div className={`memory-chip ${hasMemory ? 'active' : ''}`} title={hasMemory ? conversation?.memorySummary : '对话达到一定长度后会自动生成阶段性记忆'}>
+        <div
+          className={`memory-chip ${hasMemory ? 'active' : ''}`}
+          title={hasMemory ? conversation?.memorySummary : '对话达到一定长度后会自动生成阶段性记忆'}
+        >
           <Brain size={15} />
           <span>{hasMemory ? '阶段记忆已启用' : '等待对话记忆'}</span>
         </div>
@@ -86,13 +99,18 @@ export function ChatPanel({
               onAsk();
             }
           }}
-          placeholder="问当前笔记"
+          placeholder="问这篇笔记…"
           disabled={!selectedNote}
         />
-        <button className="primary-action compact" onClick={onAsk} disabled={!selectedNote || !chatInput.trim() || isAsking}>
-          <MessageSquare size={17} />
+        <button
+          className="primary-action compact"
+          onClick={onAsk}
+          disabled={!selectedNote || !chatInput.trim() || isAsking}
+        >
+          <MessageSquare size={16} />
           发送
         </button>
+        {selectedNote && <p className="chat-hint">Enter 发送 · Shift + Enter 换行</p>}
       </div>
     </aside>
   );
@@ -100,7 +118,7 @@ export function ChatPanel({
 
 function MessageBubble({ message }: { message: ChatMessage }) {
   return (
-    <article className={`message ${message.role}`}>
+    <article className={`message ${message.role === 'user' ? 'user' : 'assistant-msg'}`}>
       <div className="message-content">{message.content}</div>
       {message.sources?.length ? (
         <details className="source-details">
@@ -108,7 +126,9 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           <div className="source-list">
             {message.sources.slice(0, 4).map((source, index) => (
               <p key={`${source.noteId}-${source.section}-${index}`}>
-                <strong>{source.title} / {source.section}</strong>
+                <strong>
+                  {source.title} / {source.section}
+                </strong>
                 <span>{source.excerpt}</span>
               </p>
             ))}

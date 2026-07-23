@@ -1,11 +1,14 @@
 export type AiProvider = 'local' | 'openai-compatible' | 'ollama';
 export type AiTestStatus = 'idle' | 'success' | 'error';
 
+export type ThemeId = 'paper' | 'dark' | 'minimal';
+
 export interface AiSettings {
   provider: AiProvider;
   endpoint: string;
   model: string;
   apiKey: string;
+  theme?: ThemeId;
   lastTestedAt?: string;
   lastTestStatus?: AiTestStatus;
   lastTestMessage?: string;
