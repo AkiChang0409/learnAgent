@@ -5,8 +5,13 @@ const AGENT_REGISTRY = {
       '你是一个严谨的学习智能体，负责把用户当天学习的主题生成结构化中文笔记。',
       '你需要识别学科和主题，并补充相关知识总结、案例、易错点、面试问题。',
       '只输出一个 JSON 对象，不要输出 Markdown。',
-      'JSON 字段：title, subject, topic, tags, summary, sections, cases, pitfalls, interviewQuestions。',
-      'sections 是数组，每项包含 heading 和 content。tags/cases/pitfalls/interviewQuestions 都是字符串数组。'
+      'JSON 字段：title, subject, topic, tags, summary, summaryBlocks, sections, cases, pitfalls, interviewQuestions。',
+      'sections 每项包含 heading、content 和 blocks；summaryBlocks/blocks 使用 paragraph、bulletList、orderedList、table 语义块。',
+      'paragraph.runs、list.items、table.headers/rows 的单元格都由文本 run 数组组成；run 可含 text、bold、tone、highlight。',
+      'tone 只能是 accent/success/warning/danger，highlight 只能是 yellow/green/blue/red。',
+      '连续解释用 paragraph，并列要点或优缺点用 bulletList，步骤流程用 orderedList；两个以上对象按共同维度比较时优先使用 table。',
+      'table 最多 6 列 12 行；关键术语适量 bold，每小节最多 3 处 highlight，风险和易错点优先 warning/red，避免装饰性表格和满页颜色。',
+      'content/summary 同时提供对应纯文本。tags/cases/pitfalls/interviewQuestions 都是字符串数组。'
     ].join('\n')
   },
   'document.ingestor': {
@@ -27,7 +32,8 @@ const AGENT_REGISTRY = {
       '你是资深项目技术分析专家、技术面试官和复盘教练。',
       '根据 evidence 分析真实问题、需求到功能、功能到架构与数据流、工程取舍和面试价值，不得编造。',
       '只输出 SubjectKnowledgeMap JSON：subject, title, overview, tags, topics。',
-      'topics 包含 title, summary, notes；notes 包含 title, tags, summary, sections, cases, pitfalls, interviewQuestions, subNotes。',
+      'topics 包含 title, summary, notes；notes 包含 title, tags, summary, summaryBlocks, sections, cases, pitfalls, interviewQuestions, subNotes。',
+      'sections 同时包含 content 与 blocks；blocks 按内容逻辑使用 paragraph、bulletList、orderedList、table，比较关系优先表格。',
       '每篇 note 至少 4 个 sections，覆盖问题背景、实现机制、工程取舍、面试表达和优化方向。',
       '第一篇必须是项目整体技术分析；cases、pitfalls、interviewQuestions 不得留空。',
       '不要复制原文目录或使用“原文摘要”“关键内容”“技术线索”等摘录模板。'
@@ -47,7 +53,7 @@ const AGENT_REGISTRY = {
   },
   'topic.note-writer': {
     name: '主题写作 Agent',
-    system: '根据单个 NoteTask 和 evidence 写 CoreNoteDraft。只输出 JSON，包含 taskId、title、subject、topic、tags、summary、sections、usedEvidenceIds；不得引用不存在的 Evidence ID。'
+    system: '根据单个 NoteTask 和 evidence 写 CoreNoteDraft。只输出 JSON，包含 taskId、title、subject、topic、tags、summary、summaryBlocks、sections、usedEvidenceIds；sections 同时包含 content 和 blocks。blocks 使用 paragraph、bulletList、orderedList、table；比较关系优先表格，步骤使用有序列表，并列项使用无序列表；run 可适量使用 bold、受限 tone/highlight。不得引用不存在的 Evidence ID。'
   },
   'note.enricher': {
     name: '笔记增强 Agent',

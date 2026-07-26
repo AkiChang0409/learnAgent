@@ -9,6 +9,7 @@ let createModelProvider: (getApiKey: () => Promise<string>, fetchImpl: any) => a
 let normalizeUsage: (usage: unknown) => any;
 let estimateOpenAiCost: (model: string, usage: any) => any;
 let validateSyncPackage: (value: unknown) => unknown;
+let createSyncPackage: (value: unknown) => any;
 let mergeSyncData: (current: any, incoming: any) => any;
 let fixNoteHierarchy: (notes: any[]) => any[];
 let validateImportPreflight: (input: any) => void;
@@ -19,7 +20,7 @@ let loadSafeSnapshot: (storage: any, secretStore: any) => Promise<any>;
 beforeAll(() => {
   ({ validatePayload, createIpcRegistrar } = require('../electron-dist/ipc-security.cjs'));
   ({ createModelProvider, validateModelEndpoint, normalizeUsage, estimateOpenAiCost } = require('../electron-dist/model-provider.cjs'));
-  ({ validateSyncPackage, mergeSyncData, fixNoteHierarchy } = require('../electron-dist/sync-package.cjs'));
+  ({ createSyncPackage, validateSyncPackage, mergeSyncData, fixNoteHierarchy } = require('../electron-dist/sync-package.cjs'));
   ({ validateImportPreflight, estimatedImportCalls } = require('../electron-dist/import-limits.cjs'));
   ({ safeExternalUrl } = require('../electron-dist/window-security.cjs'));
   ({ loadSafeSnapshot } = require('../electron-dist/key-migration.cjs'));
@@ -49,6 +50,9 @@ describe('IPC security boundary', () => {
     expect(() => validatePayload('ai:start-markdown-import', [{ selectionId: 's1', mode: 'turbo' }])).toThrow('导入模式');
     expect(() => validatePayload('data:search-notes', ['x'.repeat(501)])).toThrow('搜索条件');
     expect(() => validatePayload('settings:set-api-key', ['x'.repeat(16_385)])).toThrow('API Key');
+    expect(() => validatePayload('ai:start-note-generation', [{ input: '', targetSubject: '计算机' }])).toThrow('生成内容');
+    expect(() => validatePayload('ai:start-note-generation', [{ input: '并发', targetSubject: 'x'.repeat(201) }])).toThrow('目标学科');
+    expect(() => validatePayload('ai:start-note-generation', [{ input: '并发', targetSubject: '计算机', settings: {} }])).not.toThrow();
   });
 });
 
@@ -86,6 +90,26 @@ describe('sync and import contracts', () => {
     expect(validateSyncPackage({ packageVersion: 1, notes: [] })).toBeTruthy();
     expect(() => validateSyncPackage({ packageVersion: 3, data: {} })).toThrow('版本');
     expect(() => validateSyncPackage({ data: { notes: [{ id: 'n' }, { id: 'n' }] } })).toThrow('重复主键');
+  });
+
+  it('keeps optional rich text in v2 sync packages while preserving plain-text fallback', () => {
+    const rich = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '重点' }] }] };
+    const note = {
+      id: 'n-rich', title: '富文本', subject: '学习', topic: '编辑', tags: [],
+      summary: '重点', summaryRich: rich,
+      sections: [{ id: 's-rich', heading: '对比', content: 'A\tB', contentRich: rich }],
+      cases: [], pitfalls: [], interviewQuestions: [], createdAt: '2026-07-24', updatedAt: '2026-07-24'
+    };
+    const syncPackage = createSyncPackage({
+      schemaVersion: 7, subjects: [], notes: [note], conversations: [], usageRecords: [], settings: { provider: 'local' }
+    });
+    expect(syncPackage.packageVersion).toBe(2);
+    expect(syncPackage.schemaVersion).toBe(7);
+    expect(syncPackage.data.notes[0]).toMatchObject({ summary: '重点', summaryRich: rich });
+    const merged = mergeSyncData({
+      subjects: [], notes: [], conversations: [], usageRecords: [], settings: { provider: 'local' }
+    }, syncPackage);
+    expect(merged.data.notes[0].sections[0].contentRich).toEqual(rich);
   });
 
   it('migrates a legacy plaintext API key and never returns it to the renderer', async () => {

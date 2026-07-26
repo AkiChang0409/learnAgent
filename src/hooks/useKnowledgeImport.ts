@@ -23,7 +23,6 @@ export function useKnowledgeImport({
   data,
   setData,
   selectedSubject,
-  isGenerating,
   setSelectedSubject,
   setSelectedNoteId,
   pushToast
@@ -31,7 +30,6 @@ export function useKnowledgeImport({
   data: AppData;
   setData: SetAppData;
   selectedSubject: string | null;
-  isGenerating: boolean;
   setSelectedSubject: (subject: string | null) => void;
   setSelectedNoteId: (noteId: string) => void;
   pushToast: (type: ToastType, message: string) => void;
@@ -48,7 +46,7 @@ export function useKnowledgeImport({
   }, []);
 
   async function importMarkdown() {
-    if (isImportingMarkdown || isGenerating) return;
+    if (isImportingMarkdown) return;
     try {
       const selection = await window.learnAgent.selectMarkdownSource();
       if (!selection.canceled) setSourceSelection(selection);
@@ -58,7 +56,7 @@ export function useKnowledgeImport({
   }
 
   async function startImport(mode: MarkdownImportMode) {
-    if (!sourceSelection || isImportingMarkdown || isGenerating) return;
+    if (!sourceSelection || isImportingMarkdown) return;
     const selection = sourceSelection;
     activeSelectionId.current = selection.selectionId;
     setSourceSelection(null);

@@ -1,9 +1,10 @@
 import type { AppData, GeneratedNoteDraft, MarkdownImportNoteDraft, Note, Subject, SubjectKnowledgeMap } from '../types';
+import { richContentFromDraft, richTextToPlainText } from './rich-text';
 
 export const DEFAULT_SUBJECT_NAME = '通用学习';
 
 export const emptyData: AppData = {
-  schemaVersion: 4,
+  schemaVersion: 7,
   subjects: [],
   notes: [],
   conversations: [],
@@ -72,18 +73,24 @@ export function ensureSubjects(data: Pick<AppData, 'subjects' | 'notes'>): Subje
 
 export function draftToNote(draft: GeneratedNoteDraft): Note {
   const now = nowIso();
+  const summaryRich = richContentFromDraft(draft.summaryBlocks, draft.summary || '', false);
   return {
     id: createId('note'),
     title: draft.title || draft.topic || '未命名笔记',
     subject: cleanSubjectName(draft.subject),
     topic: draft.topic || draft.title || '未命名主题',
     tags: normalizeList(draft.tags),
-    summary: draft.summary || '',
-    sections: (draft.sections || []).map((section) => ({
-      id: createId('section'),
-      heading: section.heading || '小节',
-      content: section.content || ''
-    })),
+    summary: richTextToPlainText(summaryRich, draft.summary || ''),
+    summaryRich,
+    sections: (draft.sections || []).map((section) => {
+      const contentRich = richContentFromDraft(section.blocks, section.content || '', true);
+      return {
+        id: createId('section'),
+        heading: section.heading || '小节',
+        content: richTextToPlainText(contentRich, section.content || ''),
+        contentRich
+      };
+    }),
     cases: normalizeList(draft.cases),
     pitfalls: normalizeList(draft.pitfalls),
     interviewQuestions: normalizeList(draft.interviewQuestions),

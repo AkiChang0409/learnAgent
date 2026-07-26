@@ -12,7 +12,7 @@ function createSyncPackage(data) {
   const { apiKey: _legacyApiKey, ...safeSettings } = data?.settings || {};
   return {
     app: 'LearnAgent', packageVersion: 2, exportedAt: new Date().toISOString(),
-    schemaVersion: data?.schemaVersion || 6,
+    schemaVersion: data?.schemaVersion || 7,
     data: {
       subjects: data?.subjects || [], notes: (data?.notes || []).map(stripSearchFields),
       conversations: data?.conversations || [], usageRecords: data?.usageRecords || [],

@@ -12,7 +12,12 @@ contextBridge.exposeInMainWorld('learnAgent', {
   retrieveContext: (payload) => ipcRenderer.invoke('data:retrieve-context', payload),
   exportSyncPackage: () => ipcRenderer.invoke('sync:export-package'),
   importSyncPackage: () => ipcRenderer.invoke('sync:import-package'),
-  generateNote: (payload) => ipcRenderer.invoke('ai:generate-note', payload),
+  startNoteGeneration: (payload) => ipcRenderer.invoke('ai:start-note-generation', payload),
+  onNoteGenerationProgress: (handler) => {
+    const listener = (_event, progress) => handler(progress);
+    ipcRenderer.on('ai:note-generation-progress', listener);
+    return () => ipcRenderer.removeListener('ai:note-generation-progress', listener);
+  },
   selectMarkdownSource: () => ipcRenderer.invoke('ai:select-markdown-source'),
   startMarkdownImport: (payload) => ipcRenderer.invoke('ai:start-markdown-import', payload),
   cancelMarkdownImport: (payload) => ipcRenderer.invoke('ai:cancel-markdown-import', payload),

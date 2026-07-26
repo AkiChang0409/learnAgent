@@ -69,6 +69,15 @@ function validatePayload(channel, args) {
     requireObject();
     if (typeof payload.selectionId !== 'string' || payload.selectionId.length > 200) throw new Error('selectionId 格式无效');
   }
+  if (channel === 'ai:start-note-generation') {
+    requireObject();
+    if (typeof payload.input !== 'string' || !payload.input.trim() || payload.input.length > 20_000) {
+      throw new Error('笔记生成内容格式无效');
+    }
+    if (typeof payload.targetSubject !== 'string' || payload.targetSubject.length > 200) {
+      throw new Error('目标学科格式无效');
+    }
+  }
   if (channel.startsWith('ai:') && !['ai:select-markdown-source', 'ai:start-markdown-import', 'ai:cancel-markdown-import'].includes(channel)) {
     requireObject();
   }

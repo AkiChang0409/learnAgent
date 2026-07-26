@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FilePlus2, Loader2, Sparkles, Upload } from 'lucide-react';
 import type {
   AiSettings,
@@ -6,6 +6,7 @@ import type {
   Conversation,
   Note,
   NoteDistillationPatch,
+  NoteGenerationProgress,
   NoteSection,
   Subject,
   ThemeId,
@@ -18,6 +19,7 @@ import { GenerateDialog } from './components/GenerateDialog';
 import { ImportProgressPanel } from './components/ImportProgressPanel';
 import { ImportModeDialog } from './components/ImportModeDialog';
 import { NoteView, type ListField } from './components/NoteView';
+import { NoteGenerationPanel } from './components/NoteGenerationPanel';
 import { SettingsView } from './components/SettingsView';
 import { ToastHost, type ToastMessage } from './components/ToastHost';
 import { useAppData } from './hooks/useAppData';
@@ -26,6 +28,7 @@ import { useKnowledgeImport } from './hooks/useKnowledgeImport';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { cleanSubjectName, createId, draftToNote, ensureSubjects, nowIso } from './services/notes';
 import { retrieveContext } from './services/rag';
+import { appendRichTextDocument, richContentFromDraft, textToRichDocument } from './services/rich-text';
 import { applyTheme, resolveTheme } from './theme';
 import { mergeTopicNames, moveNoteInTree, removeNoteWithPromotedChildren, restoreRemovedNote, rootNotePosition, selectMostRecentNoteForSubject } from './domain/library';
 
@@ -56,6 +59,8 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<Note[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [noteGenerationTasks, setNoteGenerationTasks] = useState<NoteGenerationProgress[]>([]);
+  const completedGenerationTasks = useRef(new Set<string>());
   const [isAsking, setIsAsking] = useState(false);
   const [isDistilling, setIsDistilling] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
@@ -88,6 +93,58 @@ export default function App() {
     },
     []
   );
+
+  useEffect(() => window.learnAgent.onNoteGenerationProgress((progress) => {
+    setNoteGenerationTasks((current) => {
+      const exists = current.some((task) => task.taskId === progress.taskId);
+      return exists
+        ? current.map((task) => task.taskId === progress.taskId ? progress : task)
+        : [...current, progress];
+    });
+
+    if (progress.stage === 'error') {
+      pushToast('error', `生成失败：${progress.error || '未知错误'}`);
+      return;
+    }
+    if (progress.stage !== 'done' || !progress.result || completedGenerationTasks.current.has(progress.taskId)) return;
+    completedGenerationTasks.current.add(progress.taskId);
+
+    const draftNote = draftToNote(progress.result.draft);
+    const subject = cleanSubjectName(progress.targetSubject || draftNote.subject);
+    const topic = draftNote.topic || '未命名主题';
+    const note = { ...draftNote, subject, topic };
+    const conversation = {
+      id: createId('conversation'),
+      noteId: note.id,
+      title: note.title,
+      messages: [],
+      updatedAt: nowIso()
+    };
+    setData((current) => ({
+      ...current,
+      subjects: upsertSubject(current.subjects || [], subject, note.updatedAt),
+      notes: [{ ...note, position: rootNotePosition(current.notes, subject, topic) }, ...current.notes],
+      conversations: [conversation, ...current.conversations],
+      usageRecords: progress.result?.usageRecord
+        ? [...(current.usageRecords || []), progress.result.usageRecord].slice(-1000)
+        : current.usageRecords
+    }));
+    pushToast(progress.result.usedFallback ? 'info' : 'success', progress.result.message || '笔记生成完成', {
+      action: {
+        label: '查看笔记',
+        onClick: () => {
+          setSelectedNoteId(note.id);
+          setSelectedSubject(subject);
+          setView('note');
+        }
+      },
+      duration: 8000
+    });
+    window.setTimeout(() => {
+      setNoteGenerationTasks((current) => current.filter((task) => task.taskId !== progress.taskId));
+      completedGenerationTasks.current.delete(progress.taskId);
+    }, 6500);
+  }), [pushToast, setData, setSelectedNoteId]);
 
   const theme = resolveTheme(data.settings.theme);
 
@@ -207,7 +264,6 @@ export default function App() {
     data,
     setData,
     selectedSubject,
-    isGenerating,
     setSelectedSubject,
     setSelectedNoteId,
     pushToast
@@ -428,32 +484,20 @@ export default function App() {
     if (!input || isGenerating) return;
     setIsGenerating(true);
     try {
-      const result = await window.learnAgent.generateNote({ input, settings: data.settings });
-      const draftNote = draftToNote(result.draft);
-      const subject = cleanSubjectName(selectedSubject || draftNote.subject);
-      const topic = draftNote.topic || '未命名主题';
-      const note = { ...draftNote, subject, topic };
-      const conversation = {
-        id: createId('conversation'),
-        noteId: note.id,
-        title: note.title,
-        messages: [],
+      const targetSubject = cleanSubjectName(selectedSubject);
+      const { taskId } = await window.learnAgent.startNoteGeneration({ input, targetSubject, settings: data.settings });
+      setNoteGenerationTasks((current) => current.some((task) => task.taskId === taskId) ? current : [...current, {
+        taskId,
+        stage: 'queued',
+        message: '已加入后台生成队列',
+        percent: 4,
+        input,
+        targetSubject,
         updatedAt: nowIso()
-      };
-      setData((current) => ({
-        ...current,
-        subjects: upsertSubject(current.subjects || [], subject, note.updatedAt),
-        notes: [
-          { ...note, position: rootNotePosition(current.notes, subject, topic) },
-          ...current.notes
-        ],
-        conversations: [conversation, ...current.conversations]
-      }));
-      appendUsageRecord(result.usageRecord);
-      openNote(note.id, subject);
+      }]);
       setComposer('');
       setShowGenerate(false);
-      pushToast(result.usedFallback ? 'info' : 'success', result.message || '已生成知识总结');
+      pushToast('info', '已转入后台生成，你可以继续使用其他功能');
     } catch (error) {
       pushToast('error', `生成失败：${errorMessage(error)}`);
     } finally {
@@ -716,16 +760,24 @@ export default function App() {
       if (!content) return;
       const existingIndex = nextSections.findIndex((item) => item.heading.trim() === heading);
       const block = `对话补充（${stampedTitle}）\n${content}`;
+      const addition = appendRichTextDocument(
+        textToRichDocument(`对话补充（${stampedTitle}）`),
+        '',
+        richContentFromDraft(section.blocks, content)
+      );
       if (existingIndex >= 0) {
+        const existing = nextSections[existingIndex];
         nextSections[existingIndex] = {
-          ...nextSections[existingIndex],
-          content: [nextSections[existingIndex].content.trim(), block].filter(Boolean).join('\n\n')
+          ...existing,
+          content: [existing.content.trim(), block].filter(Boolean).join('\n\n'),
+          contentRich: appendRichTextDocument(existing.contentRich, existing.content, addition)
         };
       } else {
         nextSections.push({
           id: createId('section'),
           heading,
-          content: block
+          content: block,
+          contentRich: addition
         });
       }
     });
@@ -735,6 +787,14 @@ export default function App() {
       summary: summaryAppend
         ? [note.summary.trim(), `对话补充（${stampedTitle}）\n${summaryAppend}`].filter(Boolean).join('\n\n')
         : note.summary,
+      summaryRich: summaryAppend
+        ? appendRichTextDocument(
+            note.summaryRich,
+            note.summary,
+            textToRichDocument(`对话补充（${stampedTitle}）\n${summaryAppend}`, false),
+            false
+          )
+        : note.summaryRich,
       sections: nextSections,
       tags: mergeUnique(note.tags, patch.tags),
       cases: mergeUnique(note.cases, patch.cases),
@@ -1075,9 +1135,13 @@ export default function App() {
           </div>
         )}
 
-        {importProgress && (
+        {(importProgress || noteGenerationTasks.length > 0) && (
           <div className="stage-progress">
-            <ImportProgressPanel progress={importProgress} onCancel={cancelImport} />
+            {importProgress && <ImportProgressPanel progress={importProgress} onCancel={cancelImport} />}
+            <NoteGenerationPanel
+              tasks={noteGenerationTasks}
+              onDismiss={(taskId) => setNoteGenerationTasks((current) => current.filter((task) => task.taskId !== taskId))}
+            />
           </div>
         )}
       </main>

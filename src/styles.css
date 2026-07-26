@@ -48,6 +48,8 @@
   --success: #2f7d5b;
   --success-soft-bg: #e8f4ee;
   --success-soft-border: #bfe0cf;
+  --warning-text: #8a5a00;
+  --warning-soft-bg: #fff1b8;
 
   --info-soft-bg: #e9eefb;
   --info-soft-border: #c8d5f2;
@@ -110,6 +112,8 @@
   --success: #6cc79a;
   --success-soft-bg: #1c2a24;
   --success-soft-border: #325043;
+  --warning-text: #f0c368;
+  --warning-soft-bg: #40361d;
 
   --info-soft-bg: #1c2733;
   --info-soft-border: #33465c;
@@ -167,6 +171,8 @@
   --success: #059669;
   --success-soft-bg: #e7f6f0;
   --success-soft-border: #bfe6d7;
+  --warning-text: #a16207;
+  --warning-soft-bg: #fef3c7;
 
   --info-soft-bg: #eef0fe;
   --info-soft-border: #d4d7f7;
@@ -445,6 +451,8 @@ textarea {
 .stage-progress {
   position: sticky;
   bottom: 0;
+  display: grid;
+  gap: 10px;
   padding: 0 24px 18px;
 }
 
@@ -2309,6 +2317,265 @@ label select,
   flex-wrap: wrap;
   gap: 8px 14px;
 }
+
+.rich-editor {
+  margin: 2px 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.rich-editor:hover,
+.rich-editor:focus-within {
+  border-color: var(--line);
+  background: color-mix(in srgb, var(--surface) 76%, transparent);
+}
+
+.doc-summary .rich-editor {
+  margin-bottom: 0;
+}
+
+.rich-toolbar {
+  position: sticky;
+  top: 58px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px;
+  min-height: 34px;
+  padding: 4px 6px;
+  border-bottom: 1px solid transparent;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease, border-color 120ms ease;
+}
+
+.rich-editor:hover .rich-toolbar,
+.rich-editor:focus-within .rich-toolbar {
+  border-color: var(--line);
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.rich-toolbar-button,
+.rich-toolbar-select {
+  height: 27px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-soft);
+}
+
+.rich-toolbar-button {
+  min-width: 27px;
+  padding: 0 6px;
+}
+
+.rich-toolbar-button:hover,
+.rich-toolbar-button.active,
+.rich-toolbar-select:hover {
+  color: var(--accent-soft-text);
+  background: var(--accent-soft-bg);
+}
+
+.rich-toolbar-button:disabled {
+  opacity: 0.35;
+}
+
+.rich-toolbar-select {
+  padding: 0 5px;
+}
+
+.rich-toolbar-select select {
+  width: 20px;
+  height: 24px;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font-size: 0;
+  box-shadow: none;
+}
+
+.rich-toolbar-select select:focus {
+  box-shadow: none;
+}
+
+.rich-toolbar-separator {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--line);
+}
+
+.rich-editor-content,
+.rich-editor-loading {
+  min-height: 3.2em;
+  padding: 8px;
+  color: var(--ink-body);
+  font-size: 16px;
+  line-height: 1.8;
+  outline: none;
+}
+
+.rich-editor.summary .rich-editor-content,
+.rich-editor.summary .rich-editor-loading {
+  min-height: 1.8em;
+}
+
+.rich-editor-content > :first-child { margin-top: 0; }
+.rich-editor-content > :last-child { margin-bottom: 0; }
+.rich-editor-content p { margin: 0.45em 0; }
+.rich-editor-content ul,
+.rich-editor-content ol { margin: 0.55em 0; padding-left: 1.7em; }
+.rich-editor-content li { margin: 0.2em 0; }
+.rich-editor-content li p { margin: 0; }
+
+.rich-editor-content p.is-editor-empty:first-child::before {
+  height: 0;
+  float: left;
+  color: var(--ink-faint);
+  content: attr(data-placeholder);
+  pointer-events: none;
+}
+
+.rich-editor-content table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.rich-editor-content th,
+.rich-editor-content td {
+  position: relative;
+  min-width: 90px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  vertical-align: top;
+  text-align: left;
+}
+
+.rich-editor-content th {
+  color: var(--ink);
+  background: var(--surface-inset);
+  font-weight: 800;
+}
+
+.rich-editor-content .selectedCell::after {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  content: '';
+  pointer-events: none;
+}
+
+/* ===== Background note generation ===================================== */
+
+.note-generation-panel {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.note-generation-heading {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.note-generation-heading span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.note-generation-list {
+  display: grid;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.note-generation-task {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 11px 14px;
+}
+
+.note-generation-task + .note-generation-task {
+  border-top: 1px solid var(--line);
+}
+
+.note-generation-status {
+  padding-top: 1px;
+  color: var(--accent);
+}
+
+.note-generation-task.done .note-generation-status { color: var(--success); }
+.note-generation-task.error .note-generation-status { color: var(--danger-text); }
+
+.note-generation-content {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.note-generation-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.note-generation-row span,
+.note-generation-content p {
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.note-generation-content p {
+  overflow: hidden;
+  margin: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-generation-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-inset);
+}
+
+.note-generation-bar span {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 240ms ease;
+}
+
+.note-generation-task.done .note-generation-bar span { background: var(--success); }
+.note-generation-task.error .note-generation-bar span { background: var(--danger); }
 
 .usage-legacy-summary {
   display: flex;

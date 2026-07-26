@@ -4,7 +4,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const initSqlJs = require('sql.js');
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const DEFAULT_SUBJECT_NAME = '通用学习';
 
 function defaultData() {
@@ -102,6 +102,7 @@ function createStorage(userDataPath) {
         topic TEXT NOT NULL,
         tags TEXT NOT NULL,
         summary TEXT NOT NULL,
+        summary_rich_json TEXT NOT NULL DEFAULT '',
         cases_json TEXT NOT NULL,
         pitfalls_json TEXT NOT NULL,
         interview_questions_json TEXT NOT NULL,
@@ -114,6 +115,7 @@ function createStorage(userDataPath) {
         note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
         heading TEXT NOT NULL,
         content TEXT NOT NULL,
+        content_rich_json TEXT NOT NULL DEFAULT '',
         position INTEGER NOT NULL
       );
 
@@ -167,6 +169,8 @@ function createStorage(userDataPath) {
     ensureColumn('conversations', 'summarized_message_count', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn('notes', 'parent_note_id', 'TEXT');
     ensureColumn('notes', 'position', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn('notes', 'summary_rich_json', "TEXT NOT NULL DEFAULT ''");
+    ensureColumn('note_sections', 'content_rich_json', "TEXT NOT NULL DEFAULT ''");
     ensureColumn('usage_records', 'base_estimated_cost_usd', 'REAL');
     ensureColumn('usage_records', 'calibration_multiplier', 'REAL NOT NULL DEFAULT 1');
     ensureColumn('usage_records', 'final_estimated_cost_usd', 'REAL');
@@ -402,22 +406,23 @@ function createStorage(userDataPath) {
         ]);
       }
       for (const note of notes.upsert) {
-        db.run(`INSERT INTO notes (id, parent_note_id, position, title, subject, topic, tags, summary,
+        db.run(`INSERT INTO notes (id, parent_note_id, position, title, subject, topic, tags, summary, summary_rich_json,
           cases_json, pitfalls_json, interview_questions_json, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET parent_note_id=excluded.parent_note_id, position=excluded.position,
           title=excluded.title, subject=excluded.subject, topic=excluded.topic, tags=excluded.tags,
-          summary=excluded.summary, cases_json=excluded.cases_json, pitfalls_json=excluded.pitfalls_json,
+          summary=excluded.summary, summary_rich_json=excluded.summary_rich_json,
+          cases_json=excluded.cases_json, pitfalls_json=excluded.pitfalls_json,
           interview_questions_json=excluded.interview_questions_json, created_at=excluded.created_at,
           updated_at=excluded.updated_at`, [
           note.id, note.parentId || null, Number(note.position || 0), note.title, note.subject, note.topic,
-          JSON.stringify(note.tags || []), note.summary || '', JSON.stringify(note.cases || []),
+          JSON.stringify(note.tags || []), note.summary || '', richJson(note.summaryRich), JSON.stringify(note.cases || []),
           JSON.stringify(note.pitfalls || []), JSON.stringify(note.interviewQuestions || []), note.createdAt, note.updatedAt
         ]);
         db.run('DELETE FROM note_sections WHERE note_id = ?', [note.id]);
         (note.sections || []).forEach((section, index) => db.run(
-          'INSERT INTO note_sections (id, note_id, heading, content, position) VALUES (?, ?, ?, ?, ?)',
-          [section.id, note.id, section.heading, section.content || '', index]
+          'INSERT INTO note_sections (id, note_id, heading, content, content_rich_json, position) VALUES (?, ?, ?, ?, ?, ?)',
+          [section.id, note.id, section.heading, section.content || '', richJson(section.contentRich), index]
         ));
         replaceNoteChunks(note);
       }
@@ -485,13 +490,13 @@ function createStorage(userDataPath) {
       `);
       const insertNote = db.prepare(`
         INSERT INTO notes (
-          id, parent_note_id, position, title, subject, topic, tags, summary, cases_json,
+          id, parent_note_id, position, title, subject, topic, tags, summary, summary_rich_json, cases_json,
           pitfalls_json, interview_questions_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const insertSection = db.prepare(`
-        INSERT INTO note_sections (id, note_id, heading, content, position)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO note_sections (id, note_id, heading, content, content_rich_json, position)
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
       const insertConversation = db.prepare(`
         INSERT INTO conversations (
@@ -532,6 +537,7 @@ function createStorage(userDataPath) {
           note.topic,
           JSON.stringify(note.tags || []),
           note.summary || '',
+          richJson(note.summaryRich),
           JSON.stringify(note.cases || []),
           JSON.stringify(note.pitfalls || []),
           JSON.stringify(note.interviewQuestions || []),
@@ -539,7 +545,7 @@ function createStorage(userDataPath) {
           note.updatedAt
         ]);
         (note.sections || []).forEach((section, index) => {
-          insertSection.run([section.id, note.id, section.heading, section.content || '', index]);
+          insertSection.run([section.id, note.id, section.heading, section.content || '', richJson(section.contentRich), index]);
         });
       }
 
@@ -726,7 +732,12 @@ function createStorage(userDataPath) {
     );
     sectionRows.forEach((row) => {
       const list = sectionsByNote.get(row.note_id) || [];
-      list.push({ id: row.id, heading: row.heading, content: row.content });
+      list.push({
+        id: row.id,
+        heading: row.heading,
+        content: row.content,
+        contentRich: sanitizeStoredRichText(safeParse(row.content_rich_json, null)) || undefined
+      });
       sectionsByNote.set(row.note_id, list);
     });
 
@@ -739,6 +750,7 @@ function createStorage(userDataPath) {
       topic: row.topic,
       tags: safeParse(row.tags, []),
       summary: row.summary,
+      summaryRich: sanitizeStoredRichText(safeParse(row.summary_rich_json, null)) || undefined,
       sections: sectionsByNote.get(row.id) || [],
       cases: safeParse(row.cases_json, []),
       pitfalls: safeParse(row.pitfalls_json, []),
@@ -1197,6 +1209,65 @@ function escapeSql(value) {
   return String(value).replace(/'/g, "''");
 }
 
+const RICH_NODE_TYPES = new Set([
+  'doc', 'paragraph', 'text', 'hardBreak', 'bulletList', 'orderedList', 'listItem',
+  'table', 'tableRow', 'tableHeader', 'tableCell'
+]);
+const RICH_TEXT_COLORS = new Set([
+  'var(--accent-soft-text)', 'var(--success)', 'var(--warning-text)', 'var(--danger-text)'
+]);
+const RICH_HIGHLIGHTS = new Set([
+  'var(--warning-soft-bg)', 'var(--success-soft-bg)', 'var(--accent-soft-bg)', 'var(--danger-soft-bg)'
+]);
+const RICH_CHILDREN = {
+  doc: new Set(['paragraph', 'bulletList', 'orderedList', 'table']),
+  paragraph: new Set(['text', 'hardBreak']),
+  bulletList: new Set(['listItem']), orderedList: new Set(['listItem']),
+  listItem: new Set(['paragraph', 'bulletList', 'orderedList']),
+  table: new Set(['tableRow']), tableRow: new Set(['tableHeader', 'tableCell']),
+  tableHeader: new Set(['paragraph', 'bulletList', 'orderedList']),
+  tableCell: new Set(['paragraph', 'bulletList', 'orderedList'])
+};
+
+function sanitizeStoredMarks(value) {
+  if (!Array.isArray(value)) return undefined;
+  const marks = value.flatMap((mark) => {
+    if (!mark || typeof mark !== 'object') return [];
+    if (mark.type === 'bold') return [{ type: 'bold' }];
+    const color = String(mark.attrs?.color || '');
+    if (mark.type === 'textStyle' && RICH_TEXT_COLORS.has(color)) return [{ type: 'textStyle', attrs: { color } }];
+    if (mark.type === 'highlight' && RICH_HIGHLIGHTS.has(color)) return [{ type: 'highlight', attrs: { color } }];
+    return [];
+  });
+  return marks.length ? marks : undefined;
+}
+
+function sanitizeStoredNode(value, depth = 0, parentType = '') {
+  if (!value || typeof value !== 'object' || depth > 12 || !RICH_NODE_TYPES.has(value.type)) return null;
+  if (parentType && !RICH_CHILDREN[parentType]?.has(value.type)) return null;
+  if (value.type === 'text') {
+    const text = String(value.text || '').replace(/\u0000/g, '').slice(0, 100_000);
+    const marks = sanitizeStoredMarks(value.marks);
+    return text ? { type: 'text', text, ...(marks ? { marks } : {}) } : null;
+  }
+  const limit = value.type === 'table' ? 13 : value.type === 'tableRow' ? 6 : 100;
+  const content = (Array.isArray(value.content) ? value.content : [])
+    .slice(0, limit)
+    .map((child) => sanitizeStoredNode(child, depth + 1, value.type))
+    .filter(Boolean);
+  return { type: value.type, ...(content.length ? { content } : {}) };
+}
+
+function sanitizeStoredRichText(value) {
+  const root = sanitizeStoredNode(value);
+  return root?.type === 'doc' ? root : null;
+}
+
+function richJson(value) {
+  const safe = sanitizeStoredRichText(value);
+  return safe ? JSON.stringify(safe) : '';
+}
+
 function applyChangeBatch(current, changes) {
   const applyEntities = (items, change: any = {}) => {
     const deleted = new Set(Array.isArray(change.deleteIds) ? change.deleteIds : []);
@@ -1265,6 +1336,12 @@ function validateAppData(data) {
   const noteIds = new Set(data.notes.map((note) => note.id));
   for (const note of data.notes) {
     if (note.parentId && (!noteIds.has(note.parentId) || note.parentId === note.id)) note.parentId = undefined;
+    note.summaryRich = sanitizeStoredRichText(note.summaryRich) || undefined;
+    if (!Array.isArray(note.sections)) note.sections = [];
+    note.sections = note.sections.map((section) => ({
+      ...section,
+      contentRich: sanitizeStoredRichText(section?.contentRich) || undefined
+    }));
   }
   const byId: Map<string, any> = new Map(data.notes.map((note) => [note.id, note]));
   for (const start of byId.keys()) {

@@ -21,6 +21,7 @@ let mainWindow = null;
 const agentJobRuns = new Map();
 const markdownSelections = new Map();
 const canceledImports = new Set();
+const noteGenerationTasks = new Map();
 
 function getStorage() {
   if (!storage) {
@@ -188,6 +189,76 @@ async function runAgentStep(settings, runId, agentId, userContent, operation, op
   throw new Error('Agent step failed');
 }
 
+function sendNoteGenerationProgress(sender, task, patch) {
+  Object.assign(task, patch, { updatedAt: new Date().toISOString() });
+  if (!sender || sender.isDestroyed?.()) return;
+  sender.send('ai:note-generation-progress', { ...task });
+}
+
+async function runNoteGenerationTask(sender, task, settings) {
+  let pulse = null;
+  try {
+    sendNoteGenerationProgress(sender, task, {
+      stage: 'preparing',
+      message: '正在准备生成内容',
+      percent: 12
+    });
+    let percent = 24;
+    sendNoteGenerationProgress(sender, task, {
+      stage: 'generating',
+      message: 'AI 正在生成笔记',
+      percent
+    });
+    pulse = setInterval(() => {
+      percent = Math.min(82, percent + Math.max(1, Math.round((82 - percent) * 0.16)));
+      sendNoteGenerationProgress(sender, task, { percent });
+    }, 900);
+
+    let result;
+    try {
+      const agentResult = await runAgent(settings, 'note.generator', task.input, 'generate-note', { json: true });
+      const fallback = localGeneratedNote(task.input);
+      result = {
+        draft: normalizeGeneratedNote(agentResult.json, fallback),
+        usedFallback: false,
+        message: '已使用配置模型生成笔记',
+        usageRecord: agentResult.usageRecord
+      };
+    } catch (error) {
+      const message = error?.message === 'LOCAL_PROVIDER'
+        ? '已使用本地兜底生成笔记'
+        : `模型调用失败，已使用本地兜底：${error?.message || '未知错误'}`;
+      if (error?.message !== 'LOCAL_PROVIDER') console.warn('Falling back to local note generation:', error);
+      result = { draft: localGeneratedNote(task.input), usedFallback: true, message };
+    }
+
+    if (pulse) clearInterval(pulse);
+    pulse = null;
+    sendNoteGenerationProgress(sender, task, {
+      stage: 'formatting',
+      message: '正在整理笔记结构',
+      percent: 92
+    });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    sendNoteGenerationProgress(sender, task, {
+      stage: 'done',
+      message: result.usedFallback ? '笔记已通过本地模式生成' : '笔记生成完成',
+      percent: 100,
+      result
+    });
+  } catch (error) {
+    sendNoteGenerationProgress(sender, task, {
+      stage: 'error',
+      message: '笔记生成失败',
+      percent: 100,
+      error: error?.message || '未知错误'
+    });
+  } finally {
+    if (pulse) clearInterval(pulse);
+    setTimeout(() => noteGenerationTasks.delete(task.taskId), 5 * 60_000);
+  }
+}
+
 function extractJson(text) {
   const source = String(text || '');
   const candidates = Array.from(source.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi))
@@ -265,6 +336,14 @@ function localGeneratedNote(input) {
     topic,
     tags: Array.from(new Set([subject, ...topic.split(/[，,、\s]+/).filter(Boolean).slice(0, 4)])),
     summary: `${topic}的学习可以按“概念定义、核心机制、典型场景、常见误区、可迁移问题”来整理。当前处于本地兜底模式，建议在设置中接入 Ollama 或 OpenAI-compatible 接口获得更细的学科推理与案例。`,
+    summaryBlocks: [{
+      type: 'paragraph',
+      runs: [
+        { text: `${topic}的学习可以按`, bold: false },
+        { text: '概念定义、核心机制、典型场景、常见误区、可迁移问题', bold: true, tone: 'accent' },
+        { text: '来整理。当前处于本地兜底模式。' }
+      ]
+    }],
     sections: [
       {
         heading: '核心知识点',
@@ -272,7 +351,15 @@ function localGeneratedNote(input) {
           `先明确${topic}解决的问题、输入输出、约束条件和适用边界。`,
           '把概念拆成定义、组成部分、运行流程、关键公式或规则，并记录每一步的因果关系。',
           '用自己的话复述一次，再用一个反例检查是否真的理解边界。'
-        ].join('\n')
+        ].map((item) => `- ${item}`).join('\n'),
+        blocks: [{
+          type: 'bulletList',
+          items: [
+            [{ text: `先明确${topic}解决的问题、输入输出、约束条件和适用边界。`, bold: true }],
+            [{ text: '把概念拆成定义、组成部分、运行流程、关键公式或规则，并记录每一步的因果关系。' }],
+            [{ text: '用自己的话复述一次，再用一个反例检查是否真的理解边界。', highlight: 'yellow' }]
+          ]
+        }]
       },
       {
         heading: '学习路径',
@@ -282,7 +369,17 @@ function localGeneratedNote(input) {
           '3. 找一个小案例手动推演。',
           '4. 总结最容易混淆的两个点。',
           '5. 用面试问答检验表达。'
-        ].join('\n')
+        ].join('\n'),
+        blocks: [{
+          type: 'orderedList',
+          items: [
+            [{ text: '先写出一句话定义。' }],
+            [{ text: '画出流程或结构关系。' }],
+            [{ text: '找一个小案例手动推演。' }],
+            [{ text: '总结最容易混淆的两个点。', highlight: 'yellow' }],
+            [{ text: '用面试问答检验表达。' }]
+          ]
+        }]
       }
     ],
     cases: [
@@ -632,10 +729,14 @@ function normalizeCoreNoteDraft(value, noteTask, topicPlan, subject, evidencePac
   const fallback = localGeneratedNote(noteTask.title || topicPlan.title);
   const allowedIds = evidenceIdsSet(evidencePack);
   const sections = Array.isArray(source.sections)
-    ? source.sections.map((section) => ({
-        heading: String(section?.heading || '小节').trim(),
-        content: String(section?.content || '').trim()
-      })).filter((section) => section.heading && section.content)
+    ? source.sections.map((section) => {
+        const blocks = normalizeRichBlocks(section?.blocks, true);
+        return {
+          heading: String(section?.heading || '小节').trim(),
+          content: String(section?.content || richBlocksText(blocks) || '').trim(),
+          ...(blocks.length ? { blocks } : {})
+        };
+      }).filter((section) => section.heading && section.content)
     : [];
   const mustCoverText = (noteTask.mustCover || []).map((item) => `- ${item}`).join('\n');
   return {
@@ -644,7 +745,8 @@ function normalizeCoreNoteDraft(value, noteTask, topicPlan, subject, evidencePac
     subject: String(source.subject || subject || fallback.subject).trim(),
     topic: String(source.topic || topicPlan.title || fallback.topic).trim(),
     tags: asStringList(source.tags).length ? asStringList(source.tags) : Array.from(new Set([subject, topicPlan.title, ...asStringList(fallback.tags)])),
-    summary: String(source.summary || fallback.summary || noteTask.objective || '').trim(),
+    summary: String(source.summary || richBlocksText(normalizeRichBlocks(source.summaryBlocks, false)) || fallback.summary || noteTask.objective || '').trim(),
+    summaryBlocks: normalizeRichBlocks(source.summaryBlocks, false),
     sections: sections.length ? sections : [
       {
         heading: '任务目标',
@@ -1228,13 +1330,18 @@ function normalizeMarkdownImportDraft(value, fileName, markdown) {
     subject: String(draft?.subject || fallbackDraft.subject || '综合学习').trim(),
     topic: String(draft?.topic || fallbackDraft.topic || fileName).trim(),
     tags: asStringList(draft?.tags).length ? asStringList(draft.tags) : fallbackDraft.tags,
-    summary: String(draft?.summary || fallbackDraft.summary || '').trim(),
+    summary: String(draft?.summary || richBlocksText(normalizeRichBlocks(draft?.summaryBlocks, false)) || fallbackDraft.summary || '').trim(),
     sections: Array.isArray(draft?.sections)
-      ? draft.sections.map((section) => ({
-          heading: String(section?.heading || '小节').trim(),
-          content: String(section?.content || '').trim()
-        })).filter((section) => section.content)
+      ? draft.sections.map((section) => {
+          const blocks = normalizeRichBlocks(section?.blocks, true);
+          return {
+            heading: String(section?.heading || '小节').trim(),
+            content: String(section?.content || richBlocksText(blocks) || '').trim(),
+            ...(blocks.length ? { blocks } : {})
+          };
+        }).filter((section) => section.content)
       : fallbackDraft.sections,
+    summaryBlocks: normalizeRichBlocks(draft?.summaryBlocks, false),
     cases: asStringList(draft?.cases),
     pitfalls: asStringList(draft?.pitfalls).length ? asStringList(draft.pitfalls) : fallbackDraft.pitfalls,
     interviewQuestions: asStringList(draft?.interviewQuestions).length
@@ -1304,7 +1411,8 @@ function enrichAnalysisSections(sections, summary, title) {
   const cleanSections = (sections || [])
     .map((section) => ({
       heading: textFromValue(section.heading || '小节'),
-      content: textFromValue(section.content)
+      content: textFromValue(section.content),
+      ...(Array.isArray(section.blocks) && section.blocks.length ? { blocks: section.blocks } : {})
     }))
     .filter((section) => section.heading && section.content);
   const joined = [summary, ...cleanSections.map((section) => `${section.heading}\n${section.content}`)].join('\n\n');
@@ -1366,17 +1474,22 @@ function normalizeNoteDraftForTopic(value, fallbackDraft, subject, topic) {
   const fallback = fallbackDraft || localGeneratedNote(topic);
   const sourceSections = Array.isArray(source.sections)
     ? source.sections
-        .map((section) => ({
-          heading: textFromValue(section?.heading || section?.title || section?.name || '小节'),
-          content: textFromValue(section?.content || section?.detail || section?.summary || section)
-        }))
+        .map((section) => {
+          const blocks = normalizeRichBlocks(section?.blocks, true);
+          return {
+            heading: textFromValue(section?.heading || section?.title || section?.name || '小节'),
+            content: textFromValue(section?.content || richBlocksText(blocks) || section?.detail || section?.summary || section),
+            ...(blocks.length ? { blocks } : {})
+          };
+        })
         .filter((section) => section.heading && section.content)
     : [];
-  const sourceSummary = textFromValue(source.summary || fallback.summary || '');
+  const sourceSummary = textFromValue(source.summary || richBlocksText(normalizeRichBlocks(source.summaryBlocks, false)) || fallback.summary || '');
   const fallbackSections = Array.isArray(fallback.sections)
     ? fallback.sections.map((section) => ({
         heading: textFromValue(section?.heading || '小节'),
-        content: textFromValue(section?.content || section)
+        content: textFromValue(section?.content || section),
+        ...(Array.isArray(section?.blocks) && section.blocks.length ? { blocks: section.blocks } : {})
       })).filter((section) => section.heading && section.content)
     : [];
   const normalizedSections = enrichAnalysisSections(
@@ -1390,6 +1503,7 @@ function normalizeNoteDraftForTopic(value, fallbackDraft, subject, topic) {
     topic: String(source.topic || topic || fallback.topic || '未命名主题').trim(),
     tags: asStringList(source.tags).length ? asStringList(source.tags) : asStringList(fallback.tags),
     summary: sourceSummary,
+    summaryBlocks: normalizeRichBlocks(source.summaryBlocks, false),
     sections: normalizedSections,
     cases: asStringList(source.cases).length ? asStringList(source.cases) : asStringList(fallback.cases),
     pitfalls: asStringList(source.pitfalls).length ? asStringList(source.pitfalls) : asStringList(fallback.pitfalls),
@@ -1591,10 +1705,14 @@ function normalizeDistillationPatch(value, note, memorySummary, messages) {
     summaryAppend: String(source.summaryAppend || fallback.summaryAppend || '').trim(),
     sections: Array.isArray(source.sections)
       ? source.sections
-          .map((section) => ({
-            heading: String(section?.heading || '对话沉淀').trim(),
-            content: String(section?.content || '').trim()
-          }))
+          .map((section) => {
+            const blocks = normalizeRichBlocks(section?.blocks, true);
+            return {
+              heading: String(section?.heading || '对话沉淀').trim(),
+              content: String(section?.content || richBlocksText(blocks) || '').trim(),
+              ...(blocks.length ? { blocks } : {})
+            };
+          })
           .filter((section) => section.content)
       : fallback.sections,
     tags: asStringList(source.tags).length ? asStringList(source.tags) : fallback.tags,
@@ -1617,6 +1735,118 @@ async function parallelMapLimit(items, limit, mapper) {
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
   return results;
+}
+
+function plainNoteForModel(note) {
+  return {
+    id: note?.id,
+    title: note?.title || '',
+    subject: note?.subject || '',
+    topic: note?.topic || '',
+    tags: asStringList(note?.tags),
+    summary: note?.summary || '',
+    sections: (Array.isArray(note?.sections) ? note.sections : []).map((section) => ({
+      heading: section?.heading || '',
+      content: section?.content || ''
+    })),
+    cases: asStringList(note?.cases),
+    pitfalls: asStringList(note?.pitfalls),
+    interviewQuestions: asStringList(note?.interviewQuestions)
+  };
+}
+
+function normalizeRichRuns(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 80).map((run) => {
+    const source = typeof run === 'string' ? { text: run } : run && typeof run === 'object' ? run : {};
+    const tone = ['accent', 'success', 'warning', 'danger'].includes(source.tone) ? source.tone : undefined;
+    const highlight = ['yellow', 'green', 'blue', 'red'].includes(source.highlight) ? source.highlight : undefined;
+    return {
+      text: String(source.text || '').replace(/\u0000/g, '').slice(0, 20_000),
+      ...(source.bold === true ? { bold: true } : {}),
+      ...(tone ? { tone } : {}),
+      ...(highlight ? { highlight } : {})
+    };
+  }).filter((run) => run.text);
+}
+
+function normalizeRichBlocks(value, allowTables = true) {
+  if (!Array.isArray(value)) return [];
+  let highlightCount = 0;
+  const limitHighlights = (runs) => normalizeRichRuns(runs).map((run) => {
+    if (!run.highlight) return run;
+    highlightCount += 1;
+    if (highlightCount <= 3) return run;
+    const { highlight: _highlight, ...plain } = run;
+    return plain;
+  });
+  const normalized: any[] = [];
+  value.slice(0, 40).forEach((block) => {
+    const source = block && typeof block === 'object' ? block : {};
+    if (source.type === 'paragraph') {
+      const runs = limitHighlights(source.runs);
+      if (runs.length) normalized.push({ type: 'paragraph', runs });
+      return;
+    }
+    if (source.type === 'bulletList' || source.type === 'orderedList') {
+      const items = (Array.isArray(source.items) ? source.items : []).slice(0, 40)
+        .map(limitHighlights).filter((item) => item.length);
+      if (items.length) normalized.push({ type: source.type, items });
+      return;
+    }
+    if (source.type === 'table' && allowTables) {
+      const headersSource = Array.isArray(source.headers) ? source.headers.slice(0, 6) : [];
+      const rowsSource = Array.isArray(source.rows) ? source.rows.slice(0, 12) : [];
+      const width = Math.min(6, Math.max(headersSource.length, ...rowsSource.map((row) => Array.isArray(row) ? row.length : 0)));
+      if (width < 2 || rowsSource.length < 2) return;
+      const normalizeRow = (row) => Array.from({ length: width }, (_, index) => limitHighlights(Array.isArray(row) ? row[index] : []));
+      normalized.push({ type: 'table', headers: normalizeRow(headersSource), rows: rowsSource.map(normalizeRow) });
+    }
+  });
+  return normalized;
+}
+
+function richRunsText(runs) {
+  return (runs || []).map((run) => run.text || '').join('');
+}
+
+function richBlocksText(blocks) {
+  return (blocks || []).map((block) => {
+    if (block.type === 'paragraph') return richRunsText(block.runs);
+    if (block.type === 'bulletList') return block.items.map((item) => `- ${richRunsText(item)}`).join('\n');
+    if (block.type === 'orderedList') return block.items.map((item, index) => `${index + 1}. ${richRunsText(item)}`).join('\n');
+    if (block.type === 'table') return [block.headers, ...block.rows]
+      .map((row) => row.map(richRunsText).join('\t')).join('\n');
+    return '';
+  }).filter(Boolean).join('\n\n');
+}
+
+function normalizeGeneratedNote(value, fallback) {
+  const source = value && typeof value === 'object' ? value : {};
+  const summaryBlocks = normalizeRichBlocks(source.summaryBlocks, false);
+  const sections = (Array.isArray(source.sections) ? source.sections : fallback.sections).slice(0, 20).map((section, index) => {
+    const fallbackSection = fallback.sections[index] || {};
+    const blocks = normalizeRichBlocks(section?.blocks, true);
+    return {
+      heading: String(section?.heading || fallbackSection.heading || '小节').trim(),
+      content: String(section?.content || richBlocksText(blocks) || fallbackSection.content || '').trim(),
+      ...(blocks.length ? { blocks } : fallbackSection.blocks ? { blocks: fallbackSection.blocks } : {})
+    };
+  }).filter((section) => section.heading && section.content);
+  return {
+    ...fallback,
+    ...source,
+    title: String(source.title || fallback.title).trim(),
+    subject: String(source.subject || fallback.subject).trim(),
+    topic: String(source.topic || fallback.topic).trim(),
+    tags: asStringList(source.tags).length ? asStringList(source.tags) : fallback.tags,
+    summary: String(source.summary || richBlocksText(summaryBlocks) || fallback.summary).trim(),
+    summaryBlocks: summaryBlocks.length ? summaryBlocks : fallback.summaryBlocks,
+    sections: sections.length ? sections : fallback.sections,
+    cases: asStringList(source.cases).length ? asStringList(source.cases) : fallback.cases,
+    pitfalls: asStringList(source.pitfalls).length ? asStringList(source.pitfalls) : fallback.pitfalls,
+    interviewQuestions: asStringList(source.interviewQuestions).length ? asStringList(source.interviewQuestions) : fallback.interviewQuestions
+  };
 }
 
 async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, onProgress, isCanceled) {
@@ -1822,30 +2052,20 @@ handleIpc('sync:import-package', async (event) => {
   };
 });
 
-handleIpc('ai:generate-note', async (_event, payload) => {
-  const input = payload?.input || '';
-  const settings = payload?.settings || {};
-  try {
-    const agentResult = await runAgent(settings, 'note.generator', input, 'generate-note', { json: true });
-    return {
-      draft: { ...localGeneratedNote(input), ...agentResult.json },
-      usedFallback: false,
-      message: '已使用配置模型生成笔记',
-      usageRecord: agentResult.usageRecord
-    };
-  } catch (error) {
-    const message = error?.message === 'LOCAL_PROVIDER'
-      ? '已使用本地兜底生成笔记'
-      : `模型调用失败，已使用本地兜底：${error?.message || '未知错误'}`;
-    if (error?.message !== 'LOCAL_PROVIDER') {
-      console.warn('Falling back to local note generation:', error);
-    }
-    return {
-      draft: localGeneratedNote(input),
-      usedFallback: true,
-      message
-    };
-  }
+handleIpc('ai:start-note-generation', (event, payload) => {
+  const taskId = `note_generation_${randomUUID()}`;
+  const task = {
+    taskId,
+    stage: 'queued',
+    message: '已加入后台生成队列',
+    percent: 4,
+    input: String(payload.input || '').trim(),
+    targetSubject: String(payload.targetSubject || '').trim(),
+    updatedAt: new Date().toISOString()
+  };
+  noteGenerationTasks.set(taskId, task);
+  setImmediate(() => void runNoteGenerationTask(event.sender, task, payload.settings || {}));
+  return { taskId };
 });
 
 handleIpc('ai:select-markdown-source', async (event) => {
@@ -2079,10 +2299,12 @@ handleIpc('ai:distill-conversation-to-note', async (_event, payload) => {
     '不要重复当前笔记已有内容；只提取新解释、新例子、边界条件、易错点、可复习问题。',
     '只输出一个 JSON 对象，不要输出 Markdown。',
     'JSON 字段：summaryAppend, sections, tags, cases, pitfalls, interviewQuestions。',
-    'sections 是数组，每项包含 heading 和 content。所有数组字段都是字符串数组。'
+    'sections 每项包含 heading、content 和 blocks；blocks 使用 paragraph、bulletList、orderedList、table 语义块。',
+    '并列项用 bulletList、步骤用 orderedList、共同维度的方案对比用 table；关键术语可适量 bold，每小节最多 3 处 highlight。',
+    '所有数组字段都是字符串数组，只有 blocks 按上述语义结构输出。'
   ].join('\n');
   const userContent = [
-    `当前笔记：${JSON.stringify(note)}`,
+    `当前笔记：${JSON.stringify(plainNoteForModel(note))}`,
     memorySummary ? `阶段性对话记忆：\n${memorySummary}` : '',
     `最近对话：\n${formatDialogue(messages, 18)}`
   ].filter(Boolean).join('\n\n');

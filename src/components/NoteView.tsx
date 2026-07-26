@@ -1,6 +1,13 @@
+import { lazy, Suspense } from 'react';
 import { ArrowDown, ArrowUp, ChevronRight, Plus, Sparkles, Trash2, X } from 'lucide-react';
 import type { Note, NoteSection } from '../types';
 import { AutoTextarea } from './AutoTextarea';
+
+const RichTextEditor = lazy(() => import('./RichTextEditor').then((module) => ({ default: module.RichTextEditor })));
+
+function RichEditorFallback({ text }: { text: string }) {
+  return <div className="rich-editor-loading">{text}</div>;
+}
 
 export type ListField = 'cases' | 'pitfalls' | 'interviewQuestions';
 
@@ -115,13 +122,16 @@ export function NoteView({
 
         <section className="doc-summary">
           <span className="doc-label">知识总结</span>
-          <AutoTextarea
-            className="doc-prose"
-            value={note.summary}
-            onChange={(value) => onChange({ summary: value })}
-            placeholder="一句话概括这页笔记的核心…"
-            ariaLabel="知识总结"
-          />
+          <Suspense fallback={<RichEditorFallback text={note.summary} />}>
+            <RichTextEditor
+              value={note.summaryRich}
+              fallbackText={note.summary}
+              allowTables={false}
+              onChange={(summaryRich, summary) => onChange({ summary, summaryRich })}
+              placeholder="一句话概括这页笔记的核心…"
+              ariaLabel="知识总结"
+            />
+          </Suspense>
         </section>
 
         <div className="doc-sections">
@@ -164,13 +174,15 @@ export function NoteView({
                   </button>
                 </div>
               </div>
-              <AutoTextarea
-                className="doc-prose"
-                value={section.content}
-                onChange={(value) => onUpdateSection(section.id, { content: value })}
-                placeholder="开始写这一节…"
-                ariaLabel="小节正文"
-              />
+              <Suspense fallback={<RichEditorFallback text={section.content} />}>
+                <RichTextEditor
+                  value={section.contentRich}
+                  fallbackText={section.content}
+                  onChange={(contentRich, content) => onUpdateSection(section.id, { content, contentRich })}
+                  placeholder="开始写这一节…"
+                  ariaLabel="小节正文"
+                />
+              </Suspense>
             </section>
           ))}
         </div>

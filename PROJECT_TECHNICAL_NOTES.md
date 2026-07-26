@@ -1,8 +1,20 @@
 # 项目技术深度分析文档：LearnAgent
 
-> 更新日期：2026-07-23  
-> 文档定位：面向项目复盘、架构评审、技术面试和后续 AI 笔记导入。  
-> 事实边界：本文以当前工作区源码为依据。最新一轮改动按要求没有执行测试、类型检查、构建、性能基准或安装包验证，因此文中会区分“代码已实现”和“运行验收已确认”。
+> 更新日期：2026-07-24
+> 文档定位：面向项目复盘、架构评审、技术面试和后续 AI 笔记导入。
+> 事实边界：本文以当前工作区源码、提交历史和 2026-07-24 的本机验证结果为依据。没有真实用户规模、线上故障率或生产环境成本数据的结论会明确标记为 `当前代码未体现` 或 `可推断`。
+
+本轮验证结论：
+
+| 验证项 | 结果 | 关键证据 |
+| --- | --- | --- |
+| TypeScript renderer + Electron 类型检查 | 通过 | `npm run check` 退出码 0 |
+| 单元/集成测试 | 未完全通过 | 25 项中 24 项通过；存储测试清理临时目录时因后台 checkpoint 未结束触发 `ENOTEMPTY` |
+| 生产构建 | 通过 | Vite 转换 1602 个模块，生成 Electron 与 renderer 产物 |
+| Electron smoke | 通过 | root、preload bridge 和标题检查通过 |
+| gzip 预算 | 通过 | JS 85.6KB / 100KB，CSS 7.2KB / 10KB |
+| 1000 篇笔记存储基准 | 通过 | 保存确认 P95 9.6ms；搜索 P95 72.9ms；checkpoint 事件循环延迟 15.9ms |
+| Windows 安装包、签名、自动更新 | 本轮未验证 / 当前代码未完整体现 | 仅验证到 build 与 smoke；未执行 `dist:win`，未发现签名和自动更新实现 |
 
 ## 1. 项目定位与真实需求
 
@@ -56,6 +68,8 @@ UI 区分“保存中”“变更已接收”“已保存”和“保存失败�
 
 同步包 v2 导出 subjects、notes、conversations、usageRecords 和非敏感 settings，主动删除搜索临时字段和 API Key。导入支持 v1/v2，拒绝未知版本、重复主键和畸形数组；相同 ID 按 updatedAt 合并，usage 记录去重并保留最近 1000 条。合并后会修复孤儿 parentId、自引用和多节点循环，并删除指向不存在笔记的会话。
 
+当前流程存在一个高优先级 revision 闭环缺口：`sync:import-package` 在主进程中调用 `saveData()`，存储 revision 因此加一，但返回给 renderer 的 `SyncImportResult` 不包含新 revision，`useAutosave()` 内部仍保留导入前 revision。renderer 随后因 `setData(result.data)` 产生一次新的自动保存时，可能提交 stale `baseRevision` 并收到 `REVISION_CONFLICT`；当前自动保存重试也不会主动 reload/rebase。这个问题尚无端到端测试覆盖，应在同步功能投入真实使用前修复。
+
 ## 3. 总体技术架构
 
 运行形态是 Electron 主进程 + sandboxed preload + React renderer + sql.js Worker Thread：
@@ -77,6 +91,8 @@ React UI / domain reducer / hooks
 
 主要技术栈为 React 19、TypeScript、Vite、Electron 和 sql.js。选择 sql.js 的好处是保持现有 SQLite 文件格式且不引入原生 SQLite 构建链；代价是 checkpoint 仍需导出整个数据库字节数组。当前方案把同步 SQL、索引维护和导出放进 Worker Thread，并把常规编辑改成实体级 SQL，从而避免主进程承担这些同步工作，但不能消除 sql.js 全库 export 的固有成本。
 
+从提交 `e14dc61`（版本提交 1.0.2）到当前 HEAD，新版涉及 56 个文件、约 5736 行新增和 1632 行删除。变化不是单纯 UI 增量，而是一次数据可靠性、Agent 编排、安全边界和发布门禁的系统性重构。
+
 Electron 源码使用 `.cts`，经独立 `tsconfig.electron.json` 输出 `.cjs` 到 `electron-dist/`。主进程已拆分窗口安全、IPC 安全、密钥、Provider、Agent 注册表、导入限制、同步包、密钥迁移和存储模块；`main.cts` 仍保留较多 Agent 归一化与业务编排代码，是后续继续拆分的主要位置。
 
 ## 4. 关键模块分析
@@ -86,7 +102,7 @@ Electron 源码使用 `.cts`，经独立 `tsconfig.electron.json` 输出 `.cjs` 
 - 模块职责：组织学科、主题、笔记、对话、设置和导入任务 UI。
 - 主要文件：`src/App.tsx`、`src/hooks/useAppData.ts`、`src/hooks/useAutosave.ts`、`src/hooks/useKnowledgeImport.ts`、`src/domain/library.ts`。
 - 机制：`useAppData` 通过 reducer 提供兼容 `SetStateAction` 的更新入口；排序、层级修复、移动、删除和撤销放在纯函数中。
-- 取舍：保留 `App.tsx` 作为跨领域协调器，降低一次性重构风险；代价是对话、设置和同步仍有一定集中度。
+- 取舍：保留 `App.tsx` 作为跨领域协调器，降低一次性重构风险；代价是该文件已达到约 1121 行，对话记忆、同步、设置、笔记命令和页面状态共享闭包，局部改动容易扩大回归面。
 
 ### 4.2 Preload 与 IPC 安全边界
 
@@ -101,7 +117,7 @@ Electron 源码使用 `.cts`，经独立 `tsconfig.electron.json` 输出 `.cjs` 
 - 主要文件：`electron-src/storage.cts`、`storage-thread.cts`、`storage-core.cts`。
 - 机制：协调层串行确认 revision 并写 journal；Worker 只修改受影响实体和笔记 chunk；checkpoint 写临时文件、fsync 后原子替换，并保留最近备份。启动时重放未 checkpoint journal。
 - 迁移：schema v5 回填主题和用量记账字段；v6 增加 revision、Agent run/step 和恢复元数据。旧版本迁移前复制数据库备份。
-- 取舍：journal 确认速度与 checkpoint 分离，提高交互响应；必须仔细处理队列拒绝、连续 revision 和 journal 压缩时机。
+- 取舍：journal 确认速度与 checkpoint 分离，提高交互响应；必须仔细处理队列拒绝、连续 revision、journal 压缩和 Worker 关闭时机。本轮失败测试证明，直接使用 `storage-core` 的调用方没有统一 `close()/awaitIdle()` 生命周期协议，后台 checkpoint 可能与测试目录清理竞争。
 
 ### 4.4 模型 Provider 与密钥
 
@@ -167,6 +183,8 @@ baseRevision 防止过期 renderer 覆盖新数据；journal 在确认前 fsync�
 
 导入文本不会直接拼成高优先级指令，而是作为不可信 JSON 数据放入分隔区。模型输出不直接落库：先解析 JSON、检查必要数组/布尔字段、过滤未知 Evidence ID、限制主题/笔记/补充项数量，再由本地 merger 生成最终对象。
 
+边界仍不是形式化安全保证：Ingestor 从不可信原文生成的 evidence 随后被标记为 `<VERIFIED_EVIDENCE>`，当前只验证 Evidence ID 和若干字段形状，并未证明其文本内容不含间接指令。系统 prompt 对原文注入已有防御，但还缺少 evidence 内容净化、taint 标记和专门的 prompt-injection 回归集。
+
 ### 6.5 安全桌面运行时
 
 BrowserWindow 启用 sandbox、contextIsolation 并关闭 nodeIntegration；阻止跨来源导航和新窗口，外部链接只允许 HTTPS/mailto，权限请求默认拒绝。CSP 禁止非本地脚本，敏感模型请求只在主进程发起。
@@ -175,7 +193,9 @@ BrowserWindow 启用 sandbox、contextIsolation 并关闭 nodeIntegration；阻�
 
 项目提供 Vitest、React Testing Library、临时目录存储集成测试、Electron smoke、1000 篇/每篇 5 小节存储基准和 gzip 预算脚本。GitHub Actions 的发布链为类型检查、测试、smoke、生产构建、包体预算、存储基准、npm audit 和 Windows 安装包；任一步失败都不会发布。
 
-注意：这些门禁代码已经配置，但本轮最新改动按用户要求未执行，因此当前文档不声称最新工作区已经通过门禁或达到性能阈值。
+2026-07-24 本机验证中，类型检查、生产构建、Electron smoke、gzip 预算和存储基准均通过。基准数据为：1000 篇笔记、每篇 5 小节，保存确认 P95 9.6ms、搜索 P95 72.9ms、checkpoint 事件循环延迟 15.9ms。三项分别低于 100ms、150ms 和 50ms 门槛。
+
+单元/集成测试门禁未完全通过：25 项测试中 24 项通过，`deletes dependent conversations when a note is deleted` 在断言后清理临时目录时出现 `ENOTEMPTY`。这更接近存储异步生命周期/测试 teardown 竞态，而不是级联删除断言错误，但在 CI 语义上仍是失败，因此当前代码不具备“发布门禁全绿”的事实基础。
 
 ## 7. 工程亮点与面试价值
 
@@ -186,6 +206,8 @@ BrowserWindow 启用 sandbox、contextIsolation 并关闭 nodeIntegration；阻�
 - 技术价值：同时处理响应性、并发版本和崩溃一致性，而不只是调用 `writeFile`。
 - 追问：为什么 journal 确认不等于 SQLite 已落盘？如何防止连续 revision 的 checkpoint 竞态？
 - 回答思路：解释 received/durable checkpoint 两阶段状态和 journal 压缩条件。
+
+实测佐证：在 1000 篇、每篇 5 小节的数据集上，保存确认 P95 9.6ms，checkpoint 期间主事件循环延迟 15.9ms。该结果证明当前架构在基准场景有效，但不能外推到超大数据库、机械硬盘或真实长期数据分布。
 
 ### 7.2 证据驱动的双模式 Agent 编排
 
@@ -287,16 +309,90 @@ BrowserWindow 启用 sandbox、contextIsolation 并关闭 nodeIntegration；阻�
 
 ## 9. 当前不足与技术债
 
-1. **Agent 业务编排仍集中在 main.cts**：Provider、Registry 和安全模块已经拆出，但大量 normalize/prompt/context 函数仍在主入口。影响是变更面较大；建议把 fast/deep pipeline 和 Agent runtime 分成独立服务。优先级：高。
-2. **sql.js checkpoint 仍全量 export**：Worker 避免主进程阻塞，但数据库增长后 I/O 和内存成本仍会上升。建议持续基准并设置数据库体积场景。优先级：高。
-3. **最新改动未运行验收**：测试和 CI 代码存在，但按本轮指令没有执行，不能把性能阈值、bundle 预算或安装包状态视为已确认。优先级：发布前阻断。
-4. **Agent schema 为手写校验**：字段级约束分散，后续 Agent 增多时容易不一致。建议集中 schema registry。优先级：中高。
-5. **失败任务不能从精确 step 恢复**：启动会把 running 标记为 interrupted，用户可以重新选择文件再导入，但不能直接从持久化 Evidence/Plan 继续。优先级：中。
-6. **RAG 只做关键词检索**：同义表达和跨语言召回有限。先保留基准，再评估 embedding hybrid search。优先级：中。
-7. **生产观测能力有限**：当前主要使用 console，尚无崩溃报告、结构化日志和隐私脱敏诊断包。优先级：中。
-8. **桌面发布能力未完全产品化**：自动更新、代码签名、正式图标和用户可操作备份恢复 UI 当前代码未体现。优先级：中。
+### 9.1 同步导入后的 revision 失配
+
+- 问题：同步包导入在主进程推进 revision，但结果类型和 UI 状态不接收新 revision。
+- 代码位置：`electron-src/main.cts` 的 `sync:import-package`、`src/types.ts` 的 `SyncImportResult`、`src/hooks/useAutosave.ts`。
+- 影响：导入后的下一次自动保存可能稳定触发 `REVISION_CONFLICT`，用户只能看到保存失败，重试不会自动解决 stale baseRevision。
+- 改进：让导入返回 `{data, revision}`，为 `useAppData/useAutosave` 提供原子 `replaceSnapshot`；遇到冲突时 reload 最新 snapshot 并显式 rebase 或提示用户决策。
+- 优先级：P0，发布前修复。
+
+### 9.2 存储后台任务缺少统一关闭协议
+
+- 问题：`storage-core` 会后台 schedule checkpoint，但没有 `close()/awaitIdle()`；测试只删除临时目录。
+- 代码位置：`electron-src/storage-core.cts` 的 `scheduleCheckpoint()`，`tests/storage.integration.test.ts` 的 `afterEach`。
+- 影响：本轮 25 项测试中 1 项因 `ENOTEMPTY` 失败，当前 release workflow 会被阻断；类似问题也可能影响应用退出前最后一次 flush 的可证明性。
+- 改进：提供幂等 `close()`，内部等待 journal、checkpoint、persist 队列并关闭 DB；测试 teardown 必须先 close/flush，再清理目录；Electron `before-quit` 也应显式等待或记录退出策略。
+- 优先级：P0，发布门禁阻断。
+
+### 9.3 Agent 业务编排仍集中在主入口
+
+- 问题：`electron-src/main.cts` 约 2167 行，同时承载 Agent runtime、prompt 拼装、归一化、本地 fallback、三种导入模式和 IPC handler。
+- 影响：职责边界在设计上存在、在代码文件上仍耦合；修改一种模式可能影响其他 IPC，单元测试也难以隔离。
+- 改进：拆为 `agent-runtime`、`fast-import-pipeline`、`deep-import-pipeline`、`normalizers`、`local-fallbacks`，主入口只做装配。
+- 优先级：P1。
+
+### 9.4 sql.js checkpoint 仍是全库 export
+
+- 问题：增量 SQL 只优化内存数据库热路径，持久化仍执行 `db.export()` 并原子替换整个文件。
+- 影响：数据量和附件型内容增长后，Worker 内存峰值、写放大和 checkpoint 时长都会线性上升；当前 1000 篇基准不能代表多年数据。
+- 改进：增加按数据库体积、会话长度和 chunk 数分层的长稳基准；达到阈值后评估 native SQLite WAL，而不是只比较单次搜索延迟。
+- 优先级：P1。
+
+### 9.5 Agent schema 校验浅且分散
+
+- 问题：`validateAgentOutput()` 主要检查顶层对象和少量数组，字段长度、嵌套类型、枚举、任务 ID 与 Validator rewrite 目标没有统一 schema。
+- 影响：畸形输出可能在后续 normalizer 中被静默降级，质量问题难区分是模型、prompt 还是结构错误；Agent 数量增加后约束会漂移。
+- 改进：建立 Zod/JSON Schema registry，用同一 schema 生成运行时校验、类型和错误摘要；保存脱敏 validation failure。
+- 优先级：P1。
+
+### 9.6 Evidence 仍有间接 prompt injection 风险
+
+- 问题：不可信文档经过 Ingestor 后，其文本被放入 `<VERIFIED_EVIDENCE>`，但“verified”只代表 ID 在集合内，不代表内容安全可信。
+- 影响：恶意文档可能通过 evidenceText/detail 将指令传递给 Orchestrator/Writer；目前缺少对抗测试来证明系统 prompt 足以阻断。
+- 改进：保留 `taintedSource=true` 语义、限制/转义控制性文本、在每一阶段重复声明 evidence 仍是数据，并建立注入语料回归测试。
+- 优先级：P1（安全与内容可信度）。
+
+### 9.7 Agent 任务只记录摘要，不能精确恢复
+
+- 问题：数据库保存 run/step 状态和截断摘要，但未保存 EvidenceBatch、Plan、Draft 等可执行 artifact。
+- 影响：启动只会把 running 标记为 interrupted；用户重新选择文件会重新付费，不能从失败 step 继续，也无法复现质量问题。
+- 改进：版本化 artifact 表、prompt/model/schema 版本、幂等 step key 和人工恢复 UI。
+- 优先级：P2。
+
+### 9.8 RAG 质量上限与评估缺失
+
+- 问题：检索是最多 32 个 term 的启发式计数，没有同义词、BM25/FTS5、embedding、rerank，也没有 recall/faithfulness 数据集。
+- 影响：搜索性能达标不等于召回质量达标；跨语言、别名和概念型问题容易漏召回。
+- 改进：先建立固定查询—相关 chunk 标注集，再比较 lexical、FTS5 和 hybrid；引用 UI 应区分“检索命中”与“回答真正采用”。
+- 优先级：P2。
+
+### 9.9 费用表与校准策略需要治理
+
+- 问题：价格和 `DASHBOARD_CALIBRATION` 硬编码在 `model-provider.cts`，更新时间由代码字符串表达；OpenAI-compatible 并不保证遵循 OpenAI 定价。
+- 影响：费用展示可能随模型价格变化或第三方 Endpoint 而失真，校准倍率也难解释为通用规则。
+- 改进：把价格来源、适用 Provider/Endpoint、有效期和倍率配置化；未知兼容服务默认只展示 token，不估算费用。
+- 优先级：P2。
+
+### 9.10 测试与生产观测仍不完整
+
+- 问题：已有领域、存储、安全合同和 smoke 测试，但缺少同步 revision 回归、Agent pipeline fixture、prompt injection、React 主流程和长时间稳定性测试；生产侧主要是 console。
+- 影响：当前测试数量小且偏底层，复杂 UI/Agent 组合回归和用户数据故障难定位。
+- 改进：补同步导入后编辑 E2E、失败/取消/重试矩阵、固定 AI fixtures、结构化脱敏日志、数据库健康检查和诊断包。
+- 优先级：P1（同步回归），其余 P2。
+
+### 9.11 桌面发布能力未完全产品化
+
+- 问题：当前代码未体现代码签名、自动更新、正式恢复 UI 和发布后遥测策略。
+- 影响：Windows 安装信任、升级迁移和故障恢复仍依赖人工流程。
+- 改进：先定义签名与更新通道，再做可回滚 schema/应用升级；恢复 UI 应建立在现有 backup/journal 之上。
+- 优先级：P2。
 
 ## 10. 可继续开发的高价值方向
+
+### 10.0 先完成 revision 与存储生命周期闭环
+
+这是进入新功能前最值得优先完成的可靠性工作：让所有“替换整库”的路径都返回并同步 revision，为存储实现 `close()/awaitIdle()`，补充同步导入后继续编辑以及应用退出时最后一次保存的回归测试。涉及 `storage.cts`、`storage-core.cts`、sync IPC、`useAppData/useAutosave` 和测试基建。完成后能把当前架构从“核心机制成立”提升到“跨入口一致性成立”，也是最有说服力的工程复盘材料。
 
 ### 10.1 可恢复 Agent 工作流
 
@@ -332,7 +428,7 @@ LearnAgent 是一个本地优先的 AI 学习桌面应用，用 Electron、React
 
 文档导入提供快速、深度和离线三种模式。深度模式先按 chunk 抽 Evidence，再规划主题和写作任务，Writer/Enricher 并发生成，Validator 最多触发一次定向重写，最后由本地代码合并。每一步都记录 run/step、调用数和 usage；输入文档被视为不可信数据，输出也要经过结构与 Evidence ID 校验。
 
-安全方面，BrowserWindow 使用 sandbox/contextIsolation，preload 只暴露窄化 Bridge，IPC 校验发送方和 payload；远程模型只允许 HTTPS，Ollama HTTP 只允许本机；API Key 用 safeStorage 加密并从旧数据迁移。当前边界是 sql.js checkpoint 仍需全量 export、RAG 仍是关键词检索、Agent pipeline 还可以继续从 main.ts 拆出，而且最新改动尚未执行发布验收。下一步优先做可恢复 Agent artifact 和混合 RAG。
+安全方面，BrowserWindow 使用 sandbox/contextIsolation，preload 只暴露窄化 Bridge，IPC 校验发送方和 payload；远程模型只允许 HTTPS，Ollama HTTP 只允许本机；API Key 用 safeStorage 加密并从旧数据迁移。本轮实测中类型检查、构建、smoke、包体和性能预算通过，但存储测试因后台 checkpoint 生命周期竞态未全绿，而且同步导入后存在 revision 未回传的闭环缺口。因此下一步不是先扩新功能，而是先修 revision 与 storage close 协议，再做可恢复 Agent artifact、统一 schema 和混合 RAG。
 
 ## 12. 代码证据索引
 
@@ -351,10 +447,12 @@ LearnAgent 是一个本地优先的 AI 学习桌面应用，用 Electron、React
 - `electron-src/storage.cts`：主进程 journal/revision 协调与 Worker RPC。
 - `electron-src/storage-core.cts`：schema、迁移、增量 SQL、chunk 索引、恢复与 checkpoint。
 - `electron-src/sync-package.cts`：同步包 v1/v2 校验、合并和层级修复。
+- `electron-src/main.cts` 的 `sync:import-package`：证明导入会调用 `saveData()` 推进 revision，但返回对象没有 revision。
+- `src/hooks/useAutosave.ts`：证明 renderer 使用 hook 内部 revision ref 提交 baseRevision，冲突后仅进入 error/retry，不做 reload/rebase。
 - `tests/storage.integration.test.ts`：revision、journal 恢复、增量索引、级联删除和 v4 迁移测试代码。
 - `tests/security-and-contracts.test.ts`：IPC、URL、Provider、同步、导入限制和密钥迁移测试代码。
 - `.github/workflows/release.yml`：发布门禁顺序。
-- `scripts/storage-benchmark.cjs`、`scripts/check-bundle-budget.cjs`：性能和包体预算验收代码。
+- `scripts/storage-benchmark.cjs`、`scripts/check-bundle-budget.cjs`：性能和包体预算验收代码；2026-07-24 本机实测分别通过。
 
 ## 13. 给后续 AI 笔记系统的导入提示
 
@@ -368,9 +466,11 @@ LearnAgent 是一个本地优先的 AI 学习桌面应用，用 Electron、React
 6. chunk scoring 如何同时服务搜索和 RAG。
 7. 会话记忆与知识回写闭环。
 8. 真实 Token、费用校准和历史口径治理。
+9. 同步导入 revision 失配：跨入口一致性为何比单路径正确更难。
+10. 异步存储生命周期：为什么测试 teardown 能暴露架构接口缺口。
 
 适合扩展成面试问题的难点：连续 revision 的 checkpoint 竞态、journal 何时可压缩、Agent 调用预算、Evidence ID 校验、层级循环修复、旧数据库与同步包兼容。
 
-适合转成优化路线的技术债：main.cts 继续拆分、可恢复 Agent artifact、统一 schema registry、混合 RAG、Worker 自愈、结构化诊断和桌面签名/更新。
+适合转成优化路线的技术债：revision 回传与 rebase、storage close/awaitIdle、main.cts 继续拆分、可恢复 Agent artifact、统一 schema registry、间接 prompt injection 回归、混合 RAG、Worker 自愈、结构化诊断和桌面签名/更新。
 
-信息不足时不要编造：当前没有真实用户规模、线上故障率、最新性能验收结果、代码签名状态、自动更新实现或云同步服务。历史基准与最新工作区也不能混为一谈，除非重新执行对应脚本并记录环境。
+信息不足时不要编造：当前没有真实用户规模、线上故障率、生产设备性能分布、真实 RAG 准确率、代码签名状态、自动更新实现或云同步服务。本轮基准只代表 2026-07-24 当前机器与脚本固定数据集，不能外推为线上 SLA。

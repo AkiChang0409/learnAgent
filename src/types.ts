@@ -50,6 +50,34 @@ export interface NoteSection {
   id: string;
   heading: string;
   content: string;
+  contentRich?: RichTextDocument;
+}
+
+export type RichTextTone = 'accent' | 'success' | 'warning' | 'danger';
+export type RichTextHighlight = 'yellow' | 'green' | 'blue' | 'red';
+
+export interface RichTextRun {
+  text: string;
+  bold?: boolean;
+  tone?: RichTextTone;
+  highlight?: RichTextHighlight;
+}
+
+export type RichContentBlock =
+  | { type: 'paragraph'; runs: RichTextRun[] }
+  | { type: 'bulletList' | 'orderedList'; items: RichTextRun[][] }
+  | { type: 'table'; headers: RichTextRun[][]; rows: RichTextRun[][][] };
+
+export interface RichTextNode {
+  type: string;
+  text?: string;
+  attrs?: Record<string, unknown>;
+  marks?: Array<{ type: string; attrs?: Record<string, unknown> }>;
+  content?: RichTextNode[];
+}
+
+export interface RichTextDocument extends RichTextNode {
+  type: 'doc';
 }
 
 export interface Note {
@@ -61,6 +89,7 @@ export interface Note {
   topic: string;
   tags: string[];
   summary: string;
+  summaryRich?: RichTextDocument;
   sections: NoteSection[];
   cases: string[];
   pitfalls: string[];
@@ -129,7 +158,8 @@ export interface GeneratedNoteDraft {
   topic: string;
   tags: string[];
   summary: string;
-  sections: Array<{ heading: string; content: string }>;
+  summaryBlocks?: RichContentBlock[];
+  sections: Array<{ heading: string; content: string; blocks?: RichContentBlock[] }>;
   cases: string[];
   pitfalls: string[];
   interviewQuestions: string[];
@@ -298,6 +328,20 @@ export interface MarkdownSourceSelection {
   estimatedCalls: Record<MarkdownImportMode, number>;
 }
 
+export type NoteGenerationStage = 'queued' | 'preparing' | 'generating' | 'formatting' | 'done' | 'error';
+
+export interface NoteGenerationProgress {
+  taskId: string;
+  stage: NoteGenerationStage;
+  message: string;
+  percent: number;
+  input: string;
+  targetSubject: string;
+  updatedAt: string;
+  result?: GeneratedNoteResult;
+  error?: string;
+}
+
 export interface MarkdownImportProgress {
   runId?: string;
   stage: MarkdownImportStage;
@@ -352,7 +396,7 @@ export interface ConversationMemoryResult {
 
 export interface NoteDistillationPatch {
   summaryAppend: string;
-  sections: Array<{ heading: string; content: string }>;
+  sections: Array<{ heading: string; content: string; blocks?: RichContentBlock[] }>;
   tags: string[];
   cases: string[];
   pitfalls: string[];
@@ -406,7 +450,8 @@ export interface LearnAgentBridge {
   retrieveContext: (payload: { question: string; currentNote: Note; limit?: number }) => Promise<RagContextResult>;
   exportSyncPackage: () => Promise<SyncExportResult>;
   importSyncPackage: () => Promise<SyncImportResult>;
-  generateNote: (payload: { input: string; settings: AiSettings }) => Promise<GeneratedNoteResult>;
+  startNoteGeneration: (payload: { input: string; targetSubject: string; settings: AiSettings }) => Promise<{ taskId: string }>;
+  onNoteGenerationProgress: (handler: (progress: NoteGenerationProgress) => void) => () => void;
   selectMarkdownSource: () => Promise<MarkdownSourceSelection>;
   startMarkdownImport: (payload: { selectionId: string; mode: MarkdownImportMode; settings: AiSettings }) => Promise<MarkdownImportResult>;
   cancelMarkdownImport: (payload: { selectionId: string }) => Promise<{ canceled: boolean }>;

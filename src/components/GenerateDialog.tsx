@@ -27,13 +27,13 @@ export function GenerateDialog({
 }) {
   const dialogRef = useRef<HTMLElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const close = useCallback(() => { if (!isGenerating) onClose(); }, [isGenerating, onClose]);
+  const close = useCallback(() => onClose(), [onClose]);
   useModalFocus(open, dialogRef, close, inputRef);
 
   if (!open) return null;
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={() => !isGenerating && onClose()}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         ref={dialogRef}
         className="generate-dialog"
@@ -49,10 +49,10 @@ export function GenerateDialog({
             </span>
             <div>
               <strong>AI 生成笔记</strong>
-              <span>将整理进「{targetSubject}」</span>
+              <span>将整理进「{targetSubject}」，提交后会在后台运行</span>
             </div>
           </div>
-          <button className="icon-button ghost" onClick={onClose} disabled={isGenerating} aria-label="关闭" title="关闭">
+          <button className="icon-button ghost" onClick={onClose} aria-label="关闭" title="关闭">
             <X size={18} />
           </button>
         </div>
@@ -86,7 +86,7 @@ export function GenerateDialog({
           <span className="generate-hint">Ctrl/⌘ + Enter 生成</span>
           <button className="primary-action" onClick={onGenerate} disabled={!value.trim() || isGenerating}>
             {isGenerating ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-            生成
+            后台生成
           </button>
         </div>
       </section>
