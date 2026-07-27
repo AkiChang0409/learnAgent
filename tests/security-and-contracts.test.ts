@@ -8,6 +8,7 @@ let validateModelEndpoint: (value: string, provider: string) => string;
 let createModelProvider: (getApiKey: () => Promise<string>, fetchImpl: any) => any;
 let normalizeUsage: (usage: unknown) => any;
 let estimateOpenAiCost: (model: string, usage: any) => any;
+let modelRequestTimeoutMs: (operation: string) => number;
 let validateSyncPackage: (value: unknown) => unknown;
 let createSyncPackage: (value: unknown) => any;
 let mergeSyncData: (current: any, incoming: any) => any;
@@ -19,7 +20,7 @@ let loadSafeSnapshot: (storage: any, secretStore: any) => Promise<any>;
 
 beforeAll(() => {
   ({ validatePayload, createIpcRegistrar } = require('../electron-dist/ipc-security.cjs'));
-  ({ createModelProvider, validateModelEndpoint, normalizeUsage, estimateOpenAiCost } = require('../electron-dist/model-provider.cjs'));
+  ({ createModelProvider, validateModelEndpoint, normalizeUsage, estimateOpenAiCost, modelRequestTimeoutMs } = require('../electron-dist/model-provider.cjs'));
   ({ createSyncPackage, validateSyncPackage, mergeSyncData, fixNoteHierarchy } = require('../electron-dist/sync-package.cjs'));
   ({ validateImportPreflight, estimatedImportCalls } = require('../electron-dist/import-limits.cjs'));
   ({ safeExternalUrl } = require('../electron-dist/window-security.cjs'));
@@ -53,10 +54,21 @@ describe('IPC security boundary', () => {
     expect(() => validatePayload('ai:start-note-generation', [{ input: '', targetSubject: '计算机' }])).toThrow('生成内容');
     expect(() => validatePayload('ai:start-note-generation', [{ input: '并发', targetSubject: 'x'.repeat(201) }])).toThrow('目标学科');
     expect(() => validatePayload('ai:start-note-generation', [{ input: '并发', targetSubject: '计算机', settings: {} }])).not.toThrow();
+    expect(() => validatePayload('ai:start-emphasis-analysis', [{ subject: '计算机', notes: [] }])).toThrow('笔记数量');
+    expect(() => validatePayload('ai:start-emphasis-analysis', [{
+      subject: '计算机',
+      notes: [{ id: 'n1', title: '并发', summary: '并发控制', sections: [] }],
+      settings: {}
+    }])).not.toThrow();
   });
 });
 
 describe('provider policy and accounting', () => {
+  it('allows long-running Markdown imports without weakening normal request timeouts', () => {
+    expect(modelRequestTimeoutMs('import-markdown')).toBe(300_000);
+    expect(modelRequestTimeoutMs('chat-with-note')).toBe(60_000);
+  });
+
   it('requires HTTPS remotely and loopback URLs for Ollama', () => {
     expect(() => validateModelEndpoint('http://example.com/v1/chat', 'openai-compatible')).toThrow('HTTPS');
     expect(() => validateModelEndpoint('http://example.com/api/chat', 'ollama')).toThrow('本机');

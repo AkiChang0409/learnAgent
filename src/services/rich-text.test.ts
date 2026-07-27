@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   HIGHLIGHT_COLORS,
   TEXT_COLORS,
+  applyEmphasisToDocument,
   normalizeRichBlocks,
   richBlocksToDocument,
   richTextToPlainText,
@@ -74,5 +75,28 @@ describe('rich text conversion', () => {
     expect(document.content).toHaveLength(1);
     expect(document.content?.[0].content?.[0].marks).toEqual([{ type: 'bold' }]);
     expect(richTextToPlainText(document)).toBe('安全内容');
+  });
+
+  it('adds exact phrase emphasis without changing list or table text and structure', () => {
+    const original = textToRichDocument([
+      '- Tiptap 保留编辑结构',
+      '- Markdown 导入保持兼容',
+      '',
+      '| 风险 | 处理 |',
+      '| --- | --- |',
+      '| 格式丢失 | 使用纯文本投影 |',
+      '| 任意样式 | 白名单校验 |'
+    ].join('\n'));
+    const emphasized = applyEmphasisToDocument(original, '', {
+      boldPhrases: ['Tiptap', '纯文本投影'],
+      tones: [{ text: 'Markdown', tone: 'accent' }],
+      highlights: [{ text: '格式丢失', highlight: 'yellow' }]
+    });
+
+    expect(richTextToPlainText(emphasized)).toBe(richTextToPlainText(original));
+    expect(emphasized.content?.map((node) => node.type)).toEqual(['bulletList', 'table']);
+    expect(JSON.stringify(emphasized)).toContain(TEXT_COLORS.accent);
+    expect(JSON.stringify(emphasized)).toContain(HIGHLIGHT_COLORS.yellow);
+    expect(JSON.stringify(emphasized)).toContain('bold');
   });
 });

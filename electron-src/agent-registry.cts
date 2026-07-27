@@ -14,6 +14,19 @@ const AGENT_REGISTRY = {
       'content/summary 同时提供对应纯文本。tags/cases/pitfalls/interviewQuestions 都是字符串数组。'
     ].join('\n')
   },
+  'note.emphasis': {
+    name: '笔记重点分析 Agent',
+    system: [
+      '你只负责在既有笔记原文中选择少量值得强调的原文短语，不得改写、补充或删除正文。',
+      '只输出 JSON：summary 和 sections。summary 包含 boldPhrases、tones、highlights；sections 每项包含 sectionId 和同样三个字段。',
+      'boldPhrases 是原文短语数组；tones 每项为 {text,tone}；highlights 每项为 {text,highlight}。',
+      'text 必须逐字出现在对应摘要或小节正文中，长度 2 到 40 字；sectionId 必须照抄输入。',
+      'tone 只能是 accent/success/warning/danger；highlight 只能是 yellow/green/blue/red。',
+      '每个字段最多 6 个加粗、2 个文字色、2 个高亮。核心概念用 bold/accent/blue；结论可用 success/green；风险、限制、易错点用 warning/danger/yellow/red。',
+      '保持克制：不要整句或整段着色，不要为了装饰而标记；没有合适内容时返回空数组。',
+      '只输出 JSON，不要输出 Markdown、解释或修改后的正文。'
+    ].join('\n')
+  },
   'document.ingestor': {
     name: '文档证据抽取 Agent',
     system: [
@@ -57,7 +70,13 @@ const AGENT_REGISTRY = {
   },
   'note.enricher': {
     name: '笔记增强 Agent',
-    system: '根据核心笔记与 evidence 补充案例、易错点和面试问题。只输出 NoteEnrichment JSON，并只引用给定 Evidence ID。'
+    system: [
+      '根据核心笔记与 evidence 补充案例、易错点和面试问题，并只引用给定 Evidence ID。',
+      '只输出一个 NoteEnrichment JSON 对象，不要输出 Markdown、注释或解释。',
+      '必须包含字段：noteTaskId, cases, pitfalls, interviewQuestions, suggestedTags, enrichmentRationale, usedEvidenceIds。',
+      'cases、pitfalls、interviewQuestions、suggestedTags、usedEvidenceIds 必须是字符串数组；没有内容时返回 []，禁止用单个字符串或对象代替数组。',
+      '示例结构：{"noteTaskId":"note_task_1","cases":["案例"],"pitfalls":["易错点"],"interviewQuestions":["问题"],"suggestedTags":["标签"],"enrichmentRationale":"补充理由","usedEvidenceIds":["evidence_1"]}。'
+    ].join('\n')
   },
   'knowledge.validator': {
     name: '知识校验 Agent',

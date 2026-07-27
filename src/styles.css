@@ -2738,6 +2738,7 @@ label select,
 }
 
 .import-progress-row,
+.import-progress-task,
 .import-progress-meta {
   display: flex;
   align-items: center;
@@ -2745,15 +2746,28 @@ label select,
   gap: 12px;
 }
 
-.import-progress-row strong {
+.import-progress-heading {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.import-progress-heading > span {
+  color: var(--accent-soft-text);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.import-progress-heading strong {
   overflow: hidden;
   color: var(--ink);
-  font-size: 14px;
+  font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.import-progress-row span,
+.import-progress-row > span,
 .import-progress-meta {
   color: var(--ink-soft);
   font-size: 12px;
@@ -2781,6 +2795,27 @@ label select,
 
 .import-progress.error .import-progress-bar span {
   background: var(--danger);
+}
+
+.import-progress-task {
+  min-width: 0;
+  justify-content: flex-start;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.import-progress-task span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-progress-task strong {
+  flex: 0 0 auto;
+  color: var(--ink-soft);
+  font-size: 11px;
 }
 
 .import-progress-meta {

@@ -4,7 +4,8 @@ import type {
   RichTextHighlight,
   RichTextNode,
   RichTextRun,
-  RichTextTone
+  RichTextTone,
+  EmphasisFieldPlan
 } from '../types';
 
 export const TEXT_COLORS: Record<RichTextTone, string> = {
@@ -249,4 +250,69 @@ export function appendRichTextDocument(
     type: 'doc',
     content: [...(base.content || []), ...(addition.content || [])]
   }, '', allowTables);
+}
+
+type EmphasisInterval = {
+  start: number;
+  end: number;
+  mark: NonNullable<RichTextNode['marks']>[number];
+};
+
+function emphasisMarksForText(text: string, plan: EmphasisFieldPlan, used: Set<string>): EmphasisInterval[] {
+  const intervals: EmphasisInterval[] = [];
+  const add = (phrase: string, key: string, mark: EmphasisInterval['mark']) => {
+    const clean = String(phrase || '').trim();
+    const usageKey = `${key}:${clean}`;
+    if (clean.length < 2 || used.has(usageKey)) return;
+    const start = text.indexOf(clean);
+    if (start < 0) return;
+    used.add(usageKey);
+    intervals.push({ start, end: start + clean.length, mark });
+  };
+  plan.boldPhrases.forEach((phrase) => add(phrase, 'bold', { type: 'bold' }));
+  plan.tones.forEach(({ text: phrase, tone }) => {
+    const color = TEXT_COLORS[tone];
+    if (color) add(phrase, `tone:${tone}`, { type: 'textStyle', attrs: { color } });
+  });
+  plan.highlights.forEach(({ text: phrase, highlight }) => {
+    const color = HIGHLIGHT_COLORS[highlight];
+    if (color) add(phrase, `highlight:${highlight}`, { type: 'highlight', attrs: { color } });
+  });
+  return intervals;
+}
+
+function addUniqueMark(marks: NonNullable<RichTextNode['marks']>, mark: NonNullable<RichTextNode['marks']>[number]) {
+  const duplicate = marks.some((current) => current.type === mark.type
+    && JSON.stringify(current.attrs || {}) === JSON.stringify(mark.attrs || {}));
+  return duplicate ? marks : [...marks, mark];
+}
+
+/** Adds AI-selected emphasis to existing nodes without rewriting their text or structure. */
+export function applyEmphasisToDocument(
+  value: RichTextDocument | undefined,
+  fallbackText: string,
+  plan: EmphasisFieldPlan,
+  allowTables = true
+): RichTextDocument {
+  const document = sanitizeRichTextDocument(value, fallbackText, allowTables);
+  const used = new Set<string>();
+  const visit = (node: RichTextNode): RichTextNode[] => {
+    if (node.type !== 'text') {
+      return [{ ...node, ...(node.content ? { content: node.content.flatMap(visit) } : {}) }];
+    }
+    const text = node.text || '';
+    const intervals = emphasisMarksForText(text, plan, used);
+    if (!intervals.length) return [node];
+    const boundaries = Array.from(new Set([0, text.length, ...intervals.flatMap(({ start, end }) => [start, end])]))
+      .sort((a, b) => a - b);
+    return boundaries.slice(0, -1).flatMap((start, index) => {
+      const end = boundaries[index + 1];
+      if (end <= start) return [];
+      const segmentMarks = intervals
+        .filter((interval) => interval.start <= start && interval.end >= end)
+        .reduce((marks, interval) => addUniqueMark(marks, interval.mark), [...(node.marks || [])]);
+      return [{ type: 'text', text: text.slice(start, end), ...(segmentMarks.length ? { marks: segmentMarks } : {}) }];
+    });
+  };
+  return sanitizeRichTextDocument({ type: 'doc', content: (document.content || []).flatMap(visit) }, fallbackText, allowTables);
 }

@@ -36,6 +36,7 @@ const operationLabels: Record<string, string> = {
   'chat-with-note': '笔记对话',
   'summarize-conversation': '阶段记忆',
   'distill-conversation-to-note': '沉淀笔记',
+  'analyze-emphasis': '分析重点',
   'test-connection': '连接测试',
   unknown: '未知调用'
 };

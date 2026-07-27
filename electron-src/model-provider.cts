@@ -21,6 +21,15 @@ const DASHBOARD_CALIBRATION = {
   recordedEstimatedCostUsd: 0.182022
 };
 
+const DEFAULT_MODEL_TIMEOUT_MS = 60_000;
+const LONG_RUNNING_MODEL_TIMEOUT_MS = 300_000;
+
+function modelRequestTimeoutMs(operation) {
+  return operation === 'import-markdown'
+    ? LONG_RUNNING_MODEL_TIMEOUT_MS
+    : DEFAULT_MODEL_TIMEOUT_MS;
+}
+
 function normalizeModelName(model) {
   return String(model || '').trim().toLowerCase();
 }
@@ -154,11 +163,12 @@ function createModelProvider(getApiKey, fetchImpl = fetch) {
   async function callModel(settings, system, messages, operation = 'unknown') {
     settings = { ...settings, apiKey: settings?.apiKey || await getApiKey() };
     const provider = settings?.provider || 'local';
+    const timeoutMs = modelRequestTimeoutMs(operation);
     if (provider === 'local') throw new Error('LOCAL_PROVIDER');
     const payloadMessages = [{ role: 'system', content: system }, ...messages.map(({ role, content }) => ({ role, content }))];
     if (provider === 'ollama') {
       const endpoint = validateModelEndpoint(settings?.endpoint || 'http://127.0.0.1:11434/api/chat', provider);
-      const response = await fetchWithPolicy(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: settings?.model || 'llama3.1', messages: payloadMessages, stream: false }) }, 60_000, settings?.__abortSignal, fetchImpl);
+      const response = await fetchWithPolicy(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: settings?.model || 'llama3.1', messages: payloadMessages, stream: false }) }, timeoutMs, settings?.__abortSignal, fetchImpl);
       if (!response.ok) throw await modelHttpError('Ollama', response);
       const data = await response.json();
       return { content: data?.message?.content || '', usageRecord: createUsageRecord(settings, operation, { prompt_tokens: data?.prompt_eval_count || 0, completion_tokens: data?.eval_count || 0 }, '') };
@@ -166,7 +176,7 @@ function createModelProvider(getApiKey, fetchImpl = fetch) {
     const endpoint = validateModelEndpoint(settings?.endpoint || 'https://api.openai.com/v1/chat/completions', provider);
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
-    const response = await fetchWithPolicy(endpoint, { method: 'POST', headers, body: JSON.stringify({ model: settings?.model || 'gpt-4.1-mini', messages: payloadMessages, temperature: 0.35 }) }, 60_000, settings?.__abortSignal, fetchImpl);
+    const response = await fetchWithPolicy(endpoint, { method: 'POST', headers, body: JSON.stringify({ model: settings?.model || 'gpt-4.1-mini', messages: payloadMessages, temperature: 0.35 }) }, timeoutMs, settings?.__abortSignal, fetchImpl);
     if (!response.ok) throw await modelHttpError('AI', response);
     const data = await response.json();
     return { content: data?.choices?.[0]?.message?.content || '', usageRecord: createUsageRecord(settings, operation, data?.usage, data?.id || '') };
@@ -174,4 +184,4 @@ function createModelProvider(getApiKey, fetchImpl = fetch) {
   return { callModel, aggregateUsageRecords };
 }
 
-module.exports = { createModelProvider, validateModelEndpoint, normalizeUsage, estimateOpenAiCost, fetchWithPolicy };
+module.exports = { createModelProvider, validateModelEndpoint, normalizeUsage, estimateOpenAiCost, fetchWithPolicy, modelRequestTimeoutMs };

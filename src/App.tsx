@@ -4,6 +4,7 @@ import type {
   AiSettings,
   ChatMessage,
   Conversation,
+  EmphasisAnalysisProgress,
   Note,
   NoteDistillationPatch,
   NoteGenerationProgress,
@@ -20,6 +21,7 @@ import { ImportProgressPanel } from './components/ImportProgressPanel';
 import { ImportModeDialog } from './components/ImportModeDialog';
 import { NoteView, type ListField } from './components/NoteView';
 import { NoteGenerationPanel } from './components/NoteGenerationPanel';
+import { EmphasisAnalysisPanel } from './components/EmphasisAnalysisPanel';
 import { SettingsView } from './components/SettingsView';
 import { ToastHost, type ToastMessage } from './components/ToastHost';
 import { useAppData } from './hooks/useAppData';
@@ -28,7 +30,7 @@ import { useKnowledgeImport } from './hooks/useKnowledgeImport';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { cleanSubjectName, createId, draftToNote, ensureSubjects, nowIso } from './services/notes';
 import { retrieveContext } from './services/rag';
-import { appendRichTextDocument, richContentFromDraft, textToRichDocument } from './services/rich-text';
+import { applyEmphasisToDocument, appendRichTextDocument, richContentFromDraft, textToRichDocument } from './services/rich-text';
 import { applyTheme, resolveTheme } from './theme';
 import { mergeTopicNames, moveNoteInTree, removeNoteWithPromotedChildren, restoreRemovedNote, rootNotePosition, selectMostRecentNoteForSubject } from './domain/library';
 
@@ -61,6 +63,8 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [noteGenerationTasks, setNoteGenerationTasks] = useState<NoteGenerationProgress[]>([]);
   const completedGenerationTasks = useRef(new Set<string>());
+  const [emphasisAnalysisTasks, setEmphasisAnalysisTasks] = useState<EmphasisAnalysisProgress[]>([]);
+  const appliedEmphasisResults = useRef(new Set<string>());
   const [isAsking, setIsAsking] = useState(false);
   const [isDistilling, setIsDistilling] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
@@ -145,6 +149,56 @@ export default function App() {
       completedGenerationTasks.current.delete(progress.taskId);
     }, 6500);
   }), [pushToast, setData, setSelectedNoteId]);
+
+  useEffect(() => window.learnAgent.onEmphasisAnalysisProgress((progress) => {
+    setEmphasisAnalysisTasks((current) => {
+      const exists = current.some((task) => task.taskId === progress.taskId);
+      return exists
+        ? current.map((task) => task.taskId === progress.taskId ? progress : task)
+        : [...current, progress];
+    });
+
+    if (progress.stage === 'applying' && progress.noteId && progress.patch) {
+      const resultKey = `${progress.taskId}:${progress.noteId}`;
+      if (!appliedEmphasisResults.current.has(resultKey)) {
+        appliedEmphasisResults.current.add(resultKey);
+        setData((current) => ({
+          ...current,
+          notes: current.notes.map((note) => {
+            if (note.id !== progress.noteId) return note;
+            const sectionPlans = new Map(progress.patch?.sections.map((section) => [section.sectionId, section.emphasis]));
+            return {
+              ...note,
+              summaryRich: applyEmphasisToDocument(note.summaryRich, note.summary, progress.patch!.summary, false),
+              sections: note.sections.map((section) => {
+                const emphasis = sectionPlans.get(section.id);
+                return emphasis
+                  ? { ...section, contentRich: applyEmphasisToDocument(section.contentRich, section.content, emphasis) }
+                  : section;
+              }),
+              updatedAt: nowIso()
+            };
+          }),
+          usageRecords: progress.usageRecord
+            ? [...(current.usageRecords || []), progress.usageRecord].slice(-1000)
+            : current.usageRecords
+        }));
+      }
+      return;
+    }
+    if (progress.stage === 'error') {
+      pushToast('error', `重点分析失败：${progress.error || '未知错误'}`);
+      return;
+    }
+    if (progress.stage !== 'done') return;
+    pushToast(progress.usedFallback ? 'info' : 'success', progress.message || '重点分析完成');
+    window.setTimeout(() => {
+      setEmphasisAnalysisTasks((current) => current.filter((task) => task.taskId !== progress.taskId));
+      for (const key of appliedEmphasisResults.current) {
+        if (key.startsWith(`${progress.taskId}:`)) appliedEmphasisResults.current.delete(key);
+      }
+    }, 6500);
+  }), [pushToast, setData]);
 
   const theme = resolveTheme(data.settings.theme);
 
@@ -588,6 +642,32 @@ export default function App() {
       });
       return notes === current.notes ? current : { ...current, notes };
     });
+  }
+
+  async function analyzeSubjectEmphasis() {
+    if (!selectedNote) return;
+    const subject = cleanSubjectName(selectedNote.subject);
+    const notes = data.notes.filter((note) => cleanSubjectName(note.subject) === subject);
+    if (!notes.length || emphasisAnalysisTasks.some((task) => task.subject === subject && task.stage !== 'done' && task.stage !== 'error')) return;
+    try {
+      await window.learnAgent.startEmphasisAnalysis({
+        subject,
+        notes: notes.map((note) => ({
+          id: note.id,
+          title: note.title,
+          summary: note.summary,
+          sections: note.sections.map((section) => ({
+            id: section.id,
+            heading: section.heading,
+            content: section.content
+          }))
+        })),
+        settings: data.settings
+      });
+      pushToast('info', `已在后台分析“${subject}”的 ${notes.length} 篇笔记`);
+    } catch (error) {
+      pushToast('error', `无法启动重点分析：${errorMessage(error)}`);
+    }
   }
 
   function updateSection(sectionId: string, patch: Partial<NoteSection>) {
@@ -1106,6 +1186,11 @@ export default function App() {
             onUpdateList={updateList}
             onToggleAssistant={() => setAssistantOpen((open) => !open)}
             onNavigateSubject={switchSubject}
+            onAnalyzeEmphasis={analyzeSubjectEmphasis}
+            isAnalyzingEmphasis={emphasisAnalysisTasks.some((task) =>
+              task.subject === cleanSubjectName(selectedNote.subject) && task.stage !== 'done' && task.stage !== 'error'
+            )}
+            subjectNoteCount={data.notes.filter((note) => cleanSubjectName(note.subject) === cleanSubjectName(selectedNote.subject)).length}
           />
         ) : (
           <div className="welcome">
@@ -1135,12 +1220,16 @@ export default function App() {
           </div>
         )}
 
-        {(importProgress || noteGenerationTasks.length > 0) && (
+        {(importProgress || noteGenerationTasks.length > 0 || emphasisAnalysisTasks.length > 0) && (
           <div className="stage-progress">
             {importProgress && <ImportProgressPanel progress={importProgress} onCancel={cancelImport} />}
             <NoteGenerationPanel
               tasks={noteGenerationTasks}
               onDismiss={(taskId) => setNoteGenerationTasks((current) => current.filter((task) => task.taskId !== taskId))}
+            />
+            <EmphasisAnalysisPanel
+              tasks={emphasisAnalysisTasks}
+              onDismiss={(taskId) => setEmphasisAnalysisTasks((current) => current.filter((task) => task.taskId !== taskId))}
             />
           </div>
         )}

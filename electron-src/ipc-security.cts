@@ -13,7 +13,7 @@ function createIpcRegistrar(ipcMain, getMainWindow) {
 
 function validatePayload(channel, args) {
   const serializedSize = Buffer.byteLength(JSON.stringify(args), 'utf8');
-  const maxSize = channel === 'data:apply-changes'
+  const maxSize = channel === 'data:apply-changes' || channel === 'ai:start-emphasis-analysis'
     ? 8 * 1024 * 1024
     : 4 * 1024 * 1024;
   if (serializedSize > maxSize) throw new Error(`IPC payload 过大：${channel}`);
@@ -76,6 +76,24 @@ function validatePayload(channel, args) {
     }
     if (typeof payload.targetSubject !== 'string' || payload.targetSubject.length > 200) {
       throw new Error('目标学科格式无效');
+    }
+  }
+  if (channel === 'ai:start-emphasis-analysis') {
+    requireObject();
+    if (typeof payload.subject !== 'string' || !payload.subject.trim() || payload.subject.length > 200) {
+      throw new Error('重点分析学科格式无效');
+    }
+    if (!Array.isArray(payload.notes) || !payload.notes.length || payload.notes.length > 250) {
+      throw new Error('重点分析笔记数量无效');
+    }
+    for (const note of payload.notes) {
+      if (!note || typeof note !== 'object' || typeof note.id !== 'string' || !note.id
+        || typeof note.title !== 'string' || typeof note.summary !== 'string' || !Array.isArray(note.sections)) {
+        throw new Error('重点分析笔记格式无效');
+      }
+      if (note.title.length > 500 || note.summary.length > 100_000 || note.sections.length > 100) {
+        throw new Error('重点分析笔记内容超限');
+      }
     }
   }
   if (channel.startsWith('ai:') && !['ai:select-markdown-source', 'ai:start-markdown-import', 'ai:cancel-markdown-import'].includes(channel)) {

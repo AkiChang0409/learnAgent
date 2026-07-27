@@ -11,6 +11,13 @@ const { createSyncPackage, mergeSyncData, validateSyncPackage } = require('./syn
 const { IMPORT_LIMITS, validateImportPreflight, estimatedImportCalls } = require('./import-limits.cjs');
 const { AGENT_REGISTRY } = require('./agent-registry.cjs');
 const { loadSafeSnapshot } = require('./key-migration.cjs');
+const {
+  buildAgentRetryPrompt,
+  isAgentOutputError,
+  markAgentOutputParseError,
+  normalizeAgentOutput,
+  validateAgentOutput
+} = require('./agent-output.cjs');
 
 const isDev = !app.isPackaged;
 const isSmokeTest = process.env.LEARNAGENT_SMOKE === '1';
@@ -22,6 +29,7 @@ const agentJobRuns = new Map();
 const markdownSelections = new Map();
 const canceledImports = new Set();
 const noteGenerationTasks = new Map();
+const emphasisAnalysisTasks = new Map();
 
 function getStorage() {
   if (!storage) {
@@ -63,7 +71,15 @@ async function runAgent(
     [{ role: 'user', content: userContent }],
     operation
   );
-  const json = options.json ? extractJson(modelResult.content) : null;
+  let json = null;
+  if (options.json) {
+    try {
+      json = normalizeAgentOutput(agentId, extractJson(modelResult.content));
+    } catch (error) {
+      if (isAgentOutputError(error)) throw error;
+      throw markAgentOutputParseError(error, agentId);
+    }
+  }
   if (options.json) validateAgentOutput(agentId, json);
   return {
     agentId,
@@ -75,8 +91,11 @@ async function runAgent(
 }
 
 function sendMarkdownImportProgress(event, progress) {
+  const phaseTitle = progress.phaseTitle || progress.message || '正在处理文档';
   event?.sender?.send('ai:import-markdown-progress', {
     ...progress,
+    message: progress.message || phaseTitle,
+    phaseTitle,
     updatedAt: new Date().toISOString()
   });
 }
@@ -161,13 +180,14 @@ function finishAgentJobStep(step, patch) {
 
 async function runAgentStep(settings, runId, agentId, userContent, operation, options = {}) {
   const step = createAgentJobStep(runId, agentId, userContent);
+  let attemptContent = userContent;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       step.attempt = attempt;
       const job = agentJobRuns.get(runId);
       if (job && job.actualCalls >= job.callBudget) throw new Error('AGENT_CALL_BUDGET_EXCEEDED');
       if (job) job.actualCalls += 1;
-      const result = await runAgent(settings, agentId, userContent, operation, options);
+      const result = await runAgent(settings, agentId, attemptContent, operation, options);
       finishAgentJobStep(step, {
         status: 'completed',
         outputSummary: clipText(result.content || clipJson(result.json || {}), 1200),
@@ -178,6 +198,7 @@ async function runAgentStep(settings, runId, agentId, userContent, operation, op
       const message = error?.message || '未知错误';
       const nonRetryable = /\b(?:400|401|403)\b|auth|api key|credential|校验错误|budget_exceeded/i.test(message);
       if (attempt === 1 && !nonRetryable) {
+        if (isAgentOutputError(error)) attemptContent = buildAgentRetryPrompt(userContent, error);
         finishAgentJobStep(step, { status: 'retrying', errorMessage: message, attempt: 2 });
         continue;
       }
@@ -256,6 +277,159 @@ async function runNoteGenerationTask(sender, task, settings) {
   } finally {
     if (pulse) clearInterval(pulse);
     setTimeout(() => noteGenerationTasks.delete(task.taskId), 5 * 60_000);
+  }
+}
+
+function emptyEmphasisField() {
+  return { boldPhrases: [], tones: [], highlights: [] };
+}
+
+function normalizeEmphasisField(value, sourceText) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const text = String(sourceText || '');
+  const phrases = (items, limit) => {
+    const seen = new Set();
+    return (Array.isArray(items) ? items : []).flatMap((item) => {
+      const phrase = String(item || '').trim();
+      if (phrase.length < 2 || phrase.length > 40 || !text.includes(phrase) || seen.has(phrase)) return [];
+      seen.add(phrase);
+      return [phrase];
+    }).slice(0, limit);
+  };
+  const boldPhrases = phrases(source.boldPhrases, 6);
+  const normalizeStyles = (items, key, allowed) => {
+    const seen = new Set();
+    return (Array.isArray(items) ? items : []).flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const phrase = String(item.text || '').trim();
+      const style = String(item[key] || '');
+      if (phrase.length < 2 || phrase.length > 40 || !text.includes(phrase) || !allowed.includes(style) || seen.has(phrase)) return [];
+      seen.add(phrase);
+      return [{ text: phrase, [key]: style }];
+    }).slice(0, 2);
+  };
+  return {
+    boldPhrases,
+    tones: normalizeStyles(source.tones, 'tone', ['accent', 'success', 'warning', 'danger']),
+    highlights: normalizeStyles(source.highlights, 'highlight', ['yellow', 'green', 'blue', 'red'])
+  };
+}
+
+function normalizeNoteEmphasis(value, note) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const sections = Array.isArray(source.sections) ? source.sections : [];
+  return {
+    summary: normalizeEmphasisField(source.summary, note.summary),
+    sections: note.sections.map((section) => {
+      const proposed = sections.find((item) => item && String(item.sectionId || '') === section.id);
+      return { sectionId: section.id, emphasis: normalizeEmphasisField(proposed, section.content) };
+    })
+  };
+}
+
+function localEmphasisField(sourceText) {
+  const text = String(sourceText || '');
+  const candidates = [];
+  for (const match of text.matchAll(/[“「『`]([^”」』`\n]{2,30})[”」』`]/g)) candidates.push(match[1]);
+  for (const match of text.matchAll(/(?:^|[。；\n\t])\s*([^。；：\n\t]{2,18})(?=是指|是|指的是|包括|分为|用于|采用|通过|：)/g)) candidates.push(match[1].trim());
+  for (const match of text.matchAll(/\b[A-Za-z][A-Za-z0-9_./+-]{2,30}\b/g)) candidates.push(match[0]);
+  const boldPhrases = Array.from(new Set(candidates.filter((phrase) => text.includes(phrase)))).slice(0, 4);
+  const risk = text.match(/[^。；\n]{0,12}(?:风险|注意|避免|错误|限制|缺点|易错)[^。；\n]{0,12}/)?.[0]?.trim();
+  return {
+    boldPhrases,
+    tones: boldPhrases[0] ? [{ text: boldPhrases[0], tone: 'accent' }] : [],
+    highlights: risk && risk.length <= 40 ? [{ text: risk, highlight: 'yellow' }] : []
+  };
+}
+
+function localNoteEmphasis(note) {
+  return {
+    summary: localEmphasisField(note.summary),
+    sections: note.sections.map((section) => ({ sectionId: section.id, ...localEmphasisField(section.content) }))
+  };
+}
+
+function sendEmphasisAnalysisProgress(sender, task, patch) {
+  Object.assign(task, patch, { updatedAt: new Date().toISOString() });
+  if (!sender || sender.isDestroyed?.()) return;
+  sender.send('ai:emphasis-analysis-progress', { ...task });
+}
+
+async function runEmphasisAnalysisTask(sender, task, notes, settings) {
+  let fallbackCount = 0;
+  try {
+    for (let index = 0; index < notes.length; index += 1) {
+      const note = notes[index];
+      sendEmphasisAnalysisProgress(sender, task, {
+        stage: 'analyzing',
+        message: `正在分析 ${note.title || '未命名笔记'}`,
+        current: index + 1,
+        total: notes.length,
+        noteId: note.id,
+        noteTitle: note.title,
+        patch: undefined,
+        usageRecord: undefined,
+        percent: Math.max(3, Math.round((index / notes.length) * 94))
+      });
+
+      let patch;
+      let usageRecord = null;
+      let usedFallback = false;
+      try {
+        const modelInput = {
+          noteId: note.id,
+          title: note.title,
+          summary: clipText(note.summary, 8_000),
+          sections: note.sections.slice(0, 100).map((section) => ({
+            sectionId: section.id,
+            heading: section.heading,
+            content: clipText(section.content, 8_000)
+          }))
+        };
+        const result = await runAgent(settings, 'note.emphasis', JSON.stringify(modelInput), 'analyze-emphasis', { json: true });
+        patch = normalizeNoteEmphasis(result.json, note);
+        usageRecord = result.usageRecord;
+      } catch (error) {
+        usedFallback = true;
+        fallbackCount += 1;
+        if (error?.message !== 'LOCAL_PROVIDER') console.warn('Falling back to local emphasis analysis:', error);
+        patch = normalizeNoteEmphasis(localNoteEmphasis(note), note);
+      }
+
+      sendEmphasisAnalysisProgress(sender, task, {
+        stage: 'applying',
+        message: `已标记 ${note.title || '未命名笔记'}`,
+        current: index + 1,
+        total: notes.length,
+        noteId: note.id,
+        noteTitle: note.title,
+        patch,
+        usageRecord,
+        usedFallback,
+        percent: Math.min(97, Math.round(((index + 1) / notes.length) * 94))
+      });
+    }
+    sendEmphasisAnalysisProgress(sender, task, {
+      stage: 'done',
+      message: fallbackCount ? `重点分析完成 · ${fallbackCount} 篇使用本地规则` : '重点分析完成',
+      current: notes.length,
+      total: notes.length,
+      noteId: undefined,
+      noteTitle: undefined,
+      patch: undefined,
+      usageRecord: undefined,
+      usedFallback: fallbackCount > 0,
+      percent: 100
+    });
+  } catch (error) {
+    sendEmphasisAnalysisProgress(sender, task, {
+      stage: 'error',
+      message: '重点分析失败',
+      percent: 100,
+      error: error?.message || '未知错误'
+    });
+  } finally {
+    setTimeout(() => emphasisAnalysisTasks.delete(task.taskId), 5 * 60_000);
   }
 }
 
@@ -767,12 +941,17 @@ function normalizeCoreNoteDraft(value, noteTask, topicPlan, subject, evidencePac
 function normalizeNoteEnrichment(value, noteTask, coreNote, evidencePack) {
   const source = value && typeof value === 'object' ? value : {};
   const allowedIds = evidenceIdsSet(evidencePack);
+  const fallback = localEnrichment(noteTask, coreNote, evidencePack);
+  const cases = asStringList(source.cases);
+  const pitfalls = asStringList(source.pitfalls);
+  const interviewQuestions = asStringList(source.interviewQuestions);
+  const suggestedTags = asStringList(source.suggestedTags);
   return {
     noteTaskId: String(source.noteTaskId || noteTask.id),
-    cases: asStringList(source.cases).slice(0, 5),
-    pitfalls: asStringList(source.pitfalls).slice(0, 6),
-    interviewQuestions: asStringList(source.interviewQuestions).slice(0, 10),
-    suggestedTags: asStringList(source.suggestedTags).slice(0, 8),
+    cases: (cases.length ? cases : fallback.cases).slice(0, 5),
+    pitfalls: (pitfalls.length ? pitfalls : fallback.pitfalls).slice(0, 6),
+    interviewQuestions: (interviewQuestions.length ? interviewQuestions : fallback.interviewQuestions).slice(0, 10),
+    suggestedTags: (suggestedTags.length ? suggestedTags : fallback.suggestedTags).slice(0, 8),
     enrichmentRationale: String(source.enrichmentRationale || `围绕《${coreNote.title}》补充复盘材料。`).trim(),
     usedEvidenceIds: normalizeIdList(source.usedEvidenceIds, allowedIds)
   };
@@ -968,6 +1147,18 @@ async function runMultiAgentMarkdownImport(
   const usageRecords = [];
   const evidenceBatches = [];
 
+  progress({
+    stage: 'extracting',
+    phaseTitle: '理解文档内容',
+    phaseCurrent: 2,
+    phaseTotal: 5,
+    taskMessage: '正在阅读文档并识别重要内容',
+    fileName,
+    current: 0,
+    total: chunks.length,
+    percent: 12
+  });
+
   for (const [index, chunk] of chunks.entries()) {
     const task = {
       sourceId: 'source_1',
@@ -978,15 +1169,6 @@ async function runMultiAgentMarkdownImport(
       headingPath: headingPathForChunk(chunk),
       chunkText: chunk
     };
-    progress({
-      stage: 'extracting',
-      message: `正在抽取第 ${index + 1}/${chunks.length} 个文档块的证据`,
-      fileName,
-      current: index + 1,
-      total: chunks.length,
-      percent: 18 + Math.round(((index + 1) / Math.max(chunks.length, 1)) * 24),
-      detail: task.headingPath.join(' / ') || task.chunkId
-    });
     const result = await runAgentStep(
       settings,
       job.id,
@@ -1004,15 +1186,29 @@ async function runMultiAgentMarkdownImport(
     );
     evidenceBatches.push(normalizeEvidenceBatch(result.json, task, chunk));
     if (result.usageRecord) usageRecords.push(result.usageRecord);
+    progress({
+      stage: 'extracting',
+      phaseTitle: '理解文档内容',
+      phaseCurrent: 2,
+      phaseTotal: 5,
+      taskMessage: task.headingPath.length
+        ? `已理解“${task.headingPath.join(' / ')}”`
+        : `已理解 ${index + 1} 个内容部分`,
+      fileName,
+      current: index + 1,
+      total: chunks.length,
+      percent: 12 + Math.round(((index + 1) / Math.max(chunks.length, 1)) * 30)
+    });
   }
 
   const evidenceItems = dedupeEvidenceItems(evidenceBatches);
   progress({
     stage: 'analyzing',
-    message: `已抽取 ${evidenceItems.length} 条证据，正在进行项目整体技术分析`,
+    phaseTitle: '生成笔记内容',
+    phaseCurrent: 3,
+    phaseTotal: 5,
+    taskMessage: '正在组织主题、核心内容和复习要点',
     fileName,
-    current: evidenceItems.length,
-    total: evidenceItems.length,
     percent: 46
   });
   const analysisContext = buildProjectAnalysisContext(fileName, markdown, headings, chunks, evidenceBatches, evidenceItems);
@@ -1042,9 +1238,12 @@ async function runMultiAgentMarkdownImport(
 
   progress({
     stage: 'validating',
-    message: '正在校验项目分析质量',
+    phaseTitle: '检查并完善笔记',
+    phaseCurrent: 4,
+    phaseTotal: 5,
+    taskMessage: '正在检查内容是否完整、清晰且适合复习',
     fileName,
-    percent: 88
+    percent: 84
   });
   let criticReport = null;
   try {
@@ -1080,9 +1279,12 @@ async function runMultiAgentMarkdownImport(
   if (!criticReport.ok) {
     progress({
       stage: 'analyzing',
-      message: '质量校验未通过，正在整体重写项目分析',
+      phaseTitle: '检查并完善笔记',
+      phaseCurrent: 4,
+      phaseTotal: 5,
+      taskMessage: '发现可以改进的内容，正在进一步完善笔记',
       fileName,
-      percent: 91
+      percent: 90
     });
     const rewriteContext = buildProjectAnalysisContext(
       fileName,
@@ -1118,15 +1320,19 @@ async function runMultiAgentMarkdownImport(
 
   progress({
     stage: 'normalizing',
-    message: '正在校正项目分析知识地图结构',
+    phaseTitle: '检查并完善笔记',
+    phaseCurrent: 4,
+    phaseTotal: 5,
+    taskMessage: '内容检查完成，正在整理最终笔记',
     fileName,
-    percent: 94
+    percent: 93
   });
   updateAgentJobStatus(job.id, 'completed');
   return {
     knowledgeMap,
     usageRecord: aggregateUsageRecords(usageRecords, settings, 'import-markdown'),
     validationReport: criticReport,
+    usedEnrichmentFallback: false,
     runId: job.id,
     actualCalls: job.actualCalls
   };
@@ -1855,18 +2061,22 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
   const globalConstraints = globalImportConstraints();
   const job = createAgentJob(projectBrief, sourceManifest, 'deep', estimatedImportCalls('deep', chunks.length));
   const usageRecords = [];
+  let completedChunks = 0;
+  onProgress({
+    runId: job.id,
+    mode: 'deep',
+    agentId: 'document.ingestor',
+    stage: 'extracting',
+    phaseTitle: '理解文档内容',
+    phaseCurrent: 2,
+    phaseTotal: 5,
+    taskMessage: '正在阅读文档并识别重要内容',
+    current: 0,
+    total: chunks.length,
+    percent: 12
+  });
   const evidenceBatches = await parallelMapLimit(chunks, 3, async (chunk, index) => {
     if (isCanceled()) throw new Error('IMPORT_CANCELED');
-    onProgress({
-      runId: job.id,
-      mode: 'deep',
-      agentId: 'document.ingestor',
-      stage: 'extracting',
-      message: `并行抽取证据 ${index + 1}/${chunks.length}`,
-      current: index + 1,
-      total: chunks.length,
-      percent: 18 + Math.round(((index + 1) / chunks.length) * 22)
-    });
     const task = {
       sourceId: 'source_1', fileName, chunkId: `chunk_${index + 1}`,
       chunkIndex: index + 1, chunkCount: chunks.length, headingPath: headingPathForChunk(chunk), chunkText: chunk
@@ -1875,11 +2085,38 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
       projectBrief, sourceManifest, globalConstraints, task, evidence: undefined, instruction: '只抽取当前 chunk 的可追踪 EvidenceBatch。'
     }), 'import-markdown', { json: true });
     if (result.usageRecord) usageRecords.push(result.usageRecord);
-    return normalizeEvidenceBatch(result.json, task, chunk);
+    const batch = normalizeEvidenceBatch(result.json, task, chunk);
+    completedChunks += 1;
+    onProgress({
+      runId: job.id,
+      mode: 'deep',
+      agentId: 'document.ingestor',
+      stage: 'extracting',
+      phaseTitle: '理解文档内容',
+      phaseCurrent: 2,
+      phaseTotal: 5,
+      taskMessage: task.headingPath.length
+        ? `已理解“${task.headingPath.join(' / ')}”`
+        : `已理解 ${completedChunks} 个内容部分`,
+      current: completedChunks,
+      total: chunks.length,
+      percent: 12 + Math.round((completedChunks / Math.max(chunks.length, 1)) * 30)
+    });
+    return batch;
   });
   const evidenceItems = dedupeEvidenceItems(evidenceBatches);
   if (isCanceled()) throw new Error('IMPORT_CANCELED');
-  onProgress({ runId: job.id, mode: 'deep', agentId: 'subject.orchestrator', stage: 'analyzing', message: '正在规划学科、主题与写作任务', percent: 44 });
+  onProgress({
+    runId: job.id,
+    mode: 'deep',
+    agentId: 'subject.orchestrator',
+    stage: 'analyzing',
+    phaseTitle: '生成笔记内容',
+    phaseCurrent: 3,
+    phaseTotal: 5,
+    taskMessage: '正在确定笔记主题和内容结构',
+    percent: 44
+  });
   const planResult = await runAgentStep(settings, job.id, 'subject.orchestrator', buildAgentUserPrompt({
     projectBrief, sourceManifest, globalConstraints,
     task: { fileName, evidenceCount: evidenceItems.length },
@@ -1890,25 +2127,72 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
   const plan = normalizeSubjectPlan(planResult.json, fileName, markdown, evidenceItems);
   plan.topics = plan.topics.slice(0, 8).map((topic) => ({ ...topic, noteTasks: topic.noteTasks.slice(0, 2) }));
   const tasks = plan.topics.flatMap((topic) => topic.noteTasks.map((noteTask) => ({ topic, noteTask })));
-  const written = await parallelMapLimit(tasks, 3, async ({ topic, noteTask }, index) => {
+  let completedNotes = 0;
+  onProgress({
+    runId: job.id,
+    mode: 'deep',
+    agentId: 'topic.note-writer',
+    stage: 'organizing',
+    phaseTitle: '生成笔记内容',
+    phaseCurrent: 3,
+    phaseTotal: 5,
+    taskMessage: `准备生成 ${tasks.length} 篇笔记`,
+    current: 0,
+    total: tasks.length,
+    percent: 50
+  });
+  const written = await parallelMapLimit(tasks, 3, async ({ topic, noteTask }) => {
     if (isCanceled()) throw new Error('IMPORT_CANCELED');
     const evidencePack = buildEvidencePack(noteTask, topic, evidenceItems);
-    onProgress({ runId: job.id, mode: 'deep', agentId: 'topic.note-writer', stage: 'organizing', message: `写作核心笔记 ${index + 1}/${tasks.length}`, current: index + 1, total: tasks.length, percent: 48 + Math.round(((index + 1) / Math.max(tasks.length, 1)) * 25) });
     const coreResult = await runAgentStep(settings, job.id, 'topic.note-writer', buildAgentUserPrompt({
       projectBrief, sourceManifest, globalConstraints, task: noteTask,
       evidence: evidencePack.map(compactEvidenceItem), instruction: '完成当前一篇 CoreNoteDraft。'
     }), 'import-markdown', { json: true });
     if (coreResult.usageRecord) usageRecords.push(coreResult.usageRecord);
     const core = normalizeCoreNoteDraft(coreResult.json, noteTask, topic, plan.subject, evidencePack);
-    const enrichResult = await runAgentStep(settings, job.id, 'note.enricher', buildAgentUserPrompt({
-      projectBrief, sourceManifest, globalConstraints, task: { noteTask, core },
-      evidence: evidencePack.map(compactEvidenceItem), instruction: '补充 NoteEnrichment。'
-    }), 'import-markdown', { json: true });
-    if (enrichResult.usageRecord) usageRecords.push(enrichResult.usageRecord);
-    return { topic, noteTask, evidencePack, core, enrichment: normalizeNoteEnrichment(enrichResult.json, noteTask, core, evidencePack) };
+    let enrichment;
+    let enrichmentUsedFallback = false;
+    try {
+      const enrichResult = await runAgentStep(settings, job.id, 'note.enricher', buildAgentUserPrompt({
+        projectBrief, sourceManifest, globalConstraints, task: { noteTask, core },
+        evidence: evidencePack.map(compactEvidenceItem), instruction: '补充 NoteEnrichment。'
+      }), 'import-markdown', { json: true });
+      if (enrichResult.usageRecord) usageRecords.push(enrichResult.usageRecord);
+      enrichment = normalizeNoteEnrichment(enrichResult.json, noteTask, core, evidencePack);
+    } catch (error) {
+      if (!isAgentOutputError(error)) throw error;
+      enrichmentUsedFallback = true;
+      enrichment = localEnrichment(noteTask, core, evidencePack);
+      console.warn(`note.enricher output invalid for ${noteTask.id}; using local enrichment`, error?.message || error);
+    }
+    completedNotes += 1;
+    onProgress({
+      runId: job.id,
+      mode: 'deep',
+      agentId: 'topic.note-writer',
+      stage: 'organizing',
+      phaseTitle: '生成笔记内容',
+      phaseCurrent: 3,
+      phaseTotal: 5,
+      taskMessage: `已完成《${core.title}》`,
+      current: completedNotes,
+      total: tasks.length,
+      percent: 50 + Math.round((completedNotes / Math.max(tasks.length, 1)) * 30)
+    });
+    return { topic, noteTask, evidencePack, core, enrichment, enrichmentUsedFallback };
   });
   if (isCanceled()) throw new Error('IMPORT_CANCELED');
-  onProgress({ runId: job.id, mode: 'deep', agentId: 'knowledge.validator', stage: 'validating', message: '正在校验证据覆盖与结构', percent: 84 });
+  onProgress({
+    runId: job.id,
+    mode: 'deep',
+    agentId: 'knowledge.validator',
+    stage: 'validating',
+    phaseTitle: '检查并完善笔记',
+    phaseCurrent: 4,
+    phaseTotal: 5,
+    taskMessage: '正在检查内容完整性和复习效果',
+    percent: 84
+  });
   let validation = localValidationReport(plan, written);
   try {
     const validationResult = await runAgentStep(settings, job.id, 'knowledge.validator', buildAgentUserPrompt({
@@ -1925,7 +2209,17 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
   if (rewrite && !isCanceled()) {
     const target = written.find((item) => item.noteTask.id === rewrite.targetId);
     if (target) {
-      onProgress({ runId: job.id, mode: 'deep', agentId: 'topic.note-writer', stage: 'organizing', message: '执行一次定向重写', percent: 90 });
+      onProgress({
+        runId: job.id,
+        mode: 'deep',
+        agentId: 'topic.note-writer',
+        stage: 'organizing',
+        phaseTitle: '检查并完善笔记',
+        phaseCurrent: 4,
+        phaseTotal: 5,
+        taskMessage: `正在完善《${target.core.title}》`,
+        percent: 90
+      });
       const result = await runAgentStep(settings, job.id, 'topic.note-writer', buildAgentUserPrompt({
         projectBrief, sourceManifest, globalConstraints,
         task: { ...target.noteTask, rewriteInstruction: rewrite.instruction },
@@ -1935,6 +2229,16 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
       target.core = normalizeCoreNoteDraft(result.json, target.noteTask, target.topic, plan.subject, target.evidencePack);
     }
   }
+  onProgress({
+    runId: job.id,
+    mode: 'deep',
+    stage: 'normalizing',
+    phaseTitle: '检查并完善笔记',
+    phaseCurrent: 4,
+    phaseTotal: 5,
+    taskMessage: '内容检查完成，正在整理最终笔记',
+    percent: 93
+  });
   const topics = plan.topics.map((topic) => ({
     title: topic.title,
     summary: topic.intent,
@@ -1951,31 +2255,10 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
     knowledgeMap: { subject: plan.subject, title: plan.title, overview: plan.overviewIntent, tags: plan.globalTags, topics },
     usageRecord: aggregateUsageRecords(usageRecords, settings, 'import-markdown'),
     validationReport: validation,
+    usedEnrichmentFallback: written.some((item) => item.enrichmentUsedFallback),
     runId: job.id,
     actualCalls: job.actualCalls
   };
-}
-
-function validateAgentOutput(agentId, value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${agentId} 输出不是 JSON 对象`);
-  const requireArray = (key) => {
-    if (!Array.isArray(value[key])) throw new Error(`${agentId} 输出字段 ${key} 必须是数组`);
-  };
-  if (agentId === 'note.generator') requireArray('sections');
-  if (agentId === 'document.ingestor') requireArray('evidenceItems');
-  if (agentId === 'project.analysis-master') requireArray('topics');
-  if (agentId === 'project.analysis-critic') {
-    if (typeof value.ok !== 'boolean') throw new Error(`${agentId} 输出字段 ok 必须是布尔值`);
-    requireArray('issues');
-  }
-  if (agentId === 'subject.orchestrator') requireArray('topics');
-  if (agentId === 'topic.note-writer') requireArray('sections');
-  if (agentId === 'note.enricher') {
-    requireArray('cases');
-    requireArray('pitfalls');
-    requireArray('interviewQuestions');
-  }
-  if (agentId === 'knowledge.validator') requireArray('issues');
 }
 
 async function loadRendererSnapshot() {
@@ -2068,6 +2351,24 @@ handleIpc('ai:start-note-generation', (event, payload) => {
   return { taskId };
 });
 
+handleIpc('ai:start-emphasis-analysis', (event, payload) => {
+  const taskId = `emphasis_analysis_${randomUUID()}`;
+  const task = {
+    taskId,
+    stage: 'queued',
+    message: '重点分析已加入后台任务',
+    percent: 0,
+    subject: String(payload.subject || '').trim(),
+    current: 0,
+    total: payload.notes.length,
+    updatedAt: new Date().toISOString()
+  };
+  emphasisAnalysisTasks.set(taskId, task);
+  sendEmphasisAnalysisProgress(event.sender, task, {});
+  void runEmphasisAnalysisTask(event.sender, task, payload.notes, payload.settings);
+  return { taskId };
+});
+
 handleIpc('ai:select-markdown-source', async (event) => {
   for (const [id, selection] of markdownSelections) {
     if (selection.expiresAt < Date.now()) markdownSelections.delete(id);
@@ -2141,10 +2442,28 @@ handleIpc('ai:start-markdown-import', async (event, payload) => {
     });
   };
   try {
-    progress({ stage: 'reading-file', message: `准备${mode === 'deep' ? '深度' : mode === 'offline' ? '离线' : '快速'}导入`, fileName: selection.fileName, percent: 8 });
+    progress({
+      stage: 'reading-file',
+      phaseTitle: '准备文档',
+      phaseCurrent: 1,
+      phaseTotal: 5,
+      taskMessage: `正在读取“${selection.fileName}”并准备生成笔记`,
+      fileName: selection.fileName,
+      percent: 8
+    });
     if (mode === 'offline') {
       const knowledgeMap = localMarkdownKnowledgeMap(selection.fileName, selection.markdown);
-      progress({ stage: 'done', message: '已完成离线整理（未做深度推理）', fileName: selection.fileName, percent: 100, actualCalls: 0, canCancel: false });
+      progress({
+        stage: 'normalizing',
+        phaseTitle: '检查并完善笔记',
+        phaseCurrent: 4,
+        phaseTotal: 5,
+        taskMessage: '内容已整理完成，准备保存笔记',
+        fileName: selection.fileName,
+        percent: 93,
+        actualCalls: 0,
+        canCancel: false
+      });
       return { fileName: selection.fileName, knowledgeMap, usedFallback: true, message: '离线整理、未做深度推理', mode, actualCalls: 0 };
     }
     const result = mode === 'deep'
@@ -2152,12 +2471,25 @@ handleIpc('ai:start-markdown-import', async (event, payload) => {
       : await runMultiAgentMarkdownImport(settings, selection.fileName, selection.markdown, selection.headings, selection.chunks, progress);
     if (canceledImports.has(selectionId)) throw new Error('IMPORT_CANCELED');
     const knowledgeMap = normalizeSubjectKnowledgeMap(result.knowledgeMap, selection.fileName, selection.markdown);
-    progress({ runId: result.runId, stage: 'done', message: `已生成 ${knowledgeMap.topics.length} 个主题`, fileName: selection.fileName, percent: 100, actualCalls: result.actualCalls, canCancel: false });
+    progress({
+      runId: result.runId,
+      stage: 'normalizing',
+      phaseTitle: '检查并完善笔记',
+      phaseCurrent: 4,
+      phaseTotal: 5,
+      taskMessage: `已生成 ${knowledgeMap.topics.length} 个主题，准备保存笔记`,
+      fileName: selection.fileName,
+      percent: 93,
+      actualCalls: result.actualCalls,
+      canCancel: false
+    });
     return {
       fileName: selection.fileName,
       knowledgeMap,
-      usedFallback: false,
-      message: mode === 'deep' ? '已完成深度多 Agent 分析' : '已完成快速分析',
+      usedFallback: Boolean(result.usedEnrichmentFallback),
+      message: result.usedEnrichmentFallback
+        ? '已完成深度分析；部分笔记增强使用了本地安全降级'
+        : mode === 'deep' ? '已完成深度多 Agent 分析' : '已完成快速分析',
       usageRecord: result.usageRecord,
       mode,
       runId: result.runId,

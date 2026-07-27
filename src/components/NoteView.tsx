@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { ArrowDown, ArrowUp, ChevronRight, Plus, Sparkles, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronRight, Loader2, Plus, ScanText, Sparkles, Trash2, X } from 'lucide-react';
 import type { Note, NoteSection } from '../types';
 import { AutoTextarea } from './AutoTextarea';
 
@@ -30,7 +30,10 @@ export function NoteView({
   onMoveSection,
   onUpdateList,
   onToggleAssistant,
-  onNavigateSubject
+  onNavigateSubject,
+  onAnalyzeEmphasis,
+  isAnalyzingEmphasis,
+  subjectNoteCount
 }: {
   note: Note;
   subjectOptions: string[];
@@ -45,6 +48,9 @@ export function NoteView({
   onUpdateList: (field: ListField, values: string[]) => void;
   onToggleAssistant: () => void;
   onNavigateSubject: (subject: string) => void;
+  onAnalyzeEmphasis: () => void;
+  isAnalyzingEmphasis: boolean;
+  subjectNoteCount: number;
 }) {
   return (
     <article className="note-view">
@@ -57,6 +63,16 @@ export function NoteView({
           <span className="crumb-current">{note.topic?.trim() || '未命名主题'}</span>
         </nav>
         <div className="note-topbar-actions">
+          <button
+            type="button"
+            className="assistant-toggle emphasis-analyze-button"
+            onClick={onAnalyzeEmphasis}
+            disabled={isAnalyzingEmphasis}
+            title={`分析“${note.subject}”下的 ${subjectNoteCount} 篇笔记，只添加重点样式，不改写正文`}
+          >
+            {isAnalyzingEmphasis ? <Loader2 className="spin" size={16} /> : <ScanText size={16} />}
+            {isAnalyzingEmphasis ? '分析中' : '分析重点'}
+          </button>
           <button
             type="button"
             className={`assistant-toggle ${assistantOpen ? 'active' : ''}`}

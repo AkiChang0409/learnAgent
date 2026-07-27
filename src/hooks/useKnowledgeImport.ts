@@ -63,7 +63,12 @@ export function useKnowledgeImport({
     setIsImportingMarkdown(true);
     setImportProgress({
       stage: 'selecting-file',
-      message: '准备导入 Markdown',
+      message: '准备文档',
+      phaseTitle: '准备文档',
+      phaseCurrent: 1,
+      phaseTotal: 5,
+      taskMessage: `正在准备“${selection.fileName}”`,
+      fileName: selection.fileName,
       percent: 0,
       updatedAt: nowIso()
     });
@@ -107,9 +112,15 @@ export function useKnowledgeImport({
 
       setImportProgress({
         stage: 'saving',
-        message: '正在保存生成的主题和笔记',
+        message: '保存生成的笔记',
+        phaseTitle: '保存生成的笔记',
+        phaseCurrent: 5,
+        phaseTotal: 5,
+        taskMessage: `正在保存 ${importedNotes.length} 篇笔记`,
         fileName: result.fileName,
-        percent: 94,
+        current: 0,
+        total: importedNotes.length,
+        percent: 95,
         updatedAt: nowIso()
       });
 
@@ -169,7 +180,11 @@ export function useKnowledgeImport({
       setSelectedNoteId(firstNote.id);
       setImportProgress({
         stage: 'done',
-        message: `已保存 ${stampedNotes.length} 篇笔记`,
+        message: '笔记生成完成',
+        phaseTitle: '笔记生成完成',
+        phaseCurrent: 5,
+        phaseTotal: 5,
+        taskMessage: `已保存 ${stampedNotes.length} 篇笔记`,
         fileName: result.fileName,
         current: stampedNotes.length,
         total: stampedNotes.length,

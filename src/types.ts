@@ -20,6 +20,7 @@ export type TokenUsageOperation =
   | 'chat-with-note'
   | 'summarize-conversation'
   | 'distill-conversation-to-note'
+  | 'analyze-emphasis'
   | 'test-connection'
   | 'unknown';
 
@@ -342,10 +343,51 @@ export interface NoteGenerationProgress {
   error?: string;
 }
 
+export interface EmphasisFieldPlan {
+  boldPhrases: string[];
+  tones: Array<{ text: string; tone: RichTextTone }>;
+  highlights: Array<{ text: string; highlight: RichTextHighlight }>;
+}
+
+export interface NoteEmphasisPatch {
+  summary: EmphasisFieldPlan;
+  sections: Array<{ sectionId: string; emphasis: EmphasisFieldPlan }>;
+}
+
+export interface EmphasisAnalysisNoteInput {
+  id: string;
+  title: string;
+  summary: string;
+  sections: Array<{ id: string; heading: string; content: string }>;
+}
+
+export type EmphasisAnalysisStage = 'queued' | 'analyzing' | 'applying' | 'done' | 'error';
+
+export interface EmphasisAnalysisProgress {
+  taskId: string;
+  stage: EmphasisAnalysisStage;
+  message: string;
+  percent: number;
+  subject: string;
+  current: number;
+  total: number;
+  noteId?: string;
+  noteTitle?: string;
+  patch?: NoteEmphasisPatch;
+  usageRecord?: TokenUsageRecord | null;
+  usedFallback?: boolean;
+  error?: string;
+  updatedAt: string;
+}
+
 export interface MarkdownImportProgress {
   runId?: string;
   stage: MarkdownImportStage;
   message: string;
+  phaseTitle?: string;
+  phaseCurrent?: number;
+  phaseTotal?: number;
+  taskMessage?: string;
   fileName?: string;
   current?: number;
   total?: number;
@@ -452,6 +494,8 @@ export interface LearnAgentBridge {
   importSyncPackage: () => Promise<SyncImportResult>;
   startNoteGeneration: (payload: { input: string; targetSubject: string; settings: AiSettings }) => Promise<{ taskId: string }>;
   onNoteGenerationProgress: (handler: (progress: NoteGenerationProgress) => void) => () => void;
+  startEmphasisAnalysis: (payload: { subject: string; notes: EmphasisAnalysisNoteInput[]; settings: AiSettings }) => Promise<{ taskId: string }>;
+  onEmphasisAnalysisProgress: (handler: (progress: EmphasisAnalysisProgress) => void) => () => void;
   selectMarkdownSource: () => Promise<MarkdownSourceSelection>;
   startMarkdownImport: (payload: { selectionId: string; mode: MarkdownImportMode; settings: AiSettings }) => Promise<MarkdownImportResult>;
   cancelMarkdownImport: (payload: { selectionId: string }) => Promise<{ canceled: boolean }>;

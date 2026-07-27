@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('learnAgent', {
     ipcRenderer.on('ai:note-generation-progress', listener);
     return () => ipcRenderer.removeListener('ai:note-generation-progress', listener);
   },
+  startEmphasisAnalysis: (payload) => ipcRenderer.invoke('ai:start-emphasis-analysis', payload),
+  onEmphasisAnalysisProgress: (handler) => {
+    const listener = (_event, progress) => handler(progress);
+    ipcRenderer.on('ai:emphasis-analysis-progress', listener);
+    return () => ipcRenderer.removeListener('ai:emphasis-analysis-progress', listener);
+  },
   selectMarkdownSource: () => ipcRenderer.invoke('ai:select-markdown-source'),
   startMarkdownImport: (payload) => ipcRenderer.invoke('ai:start-markdown-import', payload),
   cancelMarkdownImport: (payload) => ipcRenderer.invoke('ai:cancel-markdown-import', payload),
