@@ -10,6 +10,7 @@ function RichEditorFallback({ text }: { text: string }) {
 }
 
 export type ListField = 'cases' | 'pitfalls' | 'interviewQuestions';
+export type ListChangeKind = 'edit' | 'add' | 'remove';
 
 const INSIGHT_FIELDS: Array<{ field: ListField; title: string; placeholder: string }> = [
   { field: 'cases', title: '案例', placeholder: '记录一个具体例子…' },
@@ -45,7 +46,7 @@ export function NoteView({
   onUpdateSection: (sectionId: string, patch: Partial<NoteSection>) => void;
   onRemoveSection: (sectionId: string) => void;
   onMoveSection: (sectionId: string, direction: -1 | 1) => void;
-  onUpdateList: (field: ListField, values: string[]) => void;
+  onUpdateList: (field: ListField, values: string[], kind?: ListChangeKind) => void;
   onToggleAssistant: () => void;
   onNavigateSubject: (subject: string) => void;
   onAnalyzeEmphasis: () => void;
@@ -215,7 +216,7 @@ export function NoteView({
               title={title}
               placeholder={placeholder}
               values={note[field]}
-              onChange={(values) => onUpdateList(field, values)}
+              onChange={(values, kind) => onUpdateList(field, values, kind)}
             />
           ))}
         </div>
@@ -233,7 +234,7 @@ function InlineList({
   title: string;
   values: string[];
   placeholder: string;
-  onChange: (values: string[]) => void;
+  onChange: (values: string[], kind?: ListChangeKind) => void;
 }) {
   return (
     <section className="inline-list">
@@ -241,7 +242,7 @@ function InlineList({
         <span className="doc-label">{title}</span>
         <button
           className="icon-button ghost"
-          onClick={() => onChange([...values, ''])}
+          onClick={() => onChange([...values, ''], 'add')}
           title={`添加${title}`}
           aria-label={`添加${title}`}
         >
@@ -265,7 +266,7 @@ function InlineList({
               />
               <button
                 className="icon-button ghost danger"
-                onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}
+                onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index), 'remove')}
                 aria-label="删除"
                 title="删除"
               >
@@ -275,7 +276,7 @@ function InlineList({
           ))}
         </ul>
       ) : (
-        <button className="inline-list-empty" onClick={() => onChange([''])} type="button">
+        <button className="inline-list-empty" onClick={() => onChange([''], 'add')} type="button">
           <Plus size={14} />
           {placeholder}
         </button>

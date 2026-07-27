@@ -20,7 +20,7 @@ import { ConfirmDialog, type ConfirmRequest } from './components/ConfirmDialog';
 import { GenerateDialog } from './components/GenerateDialog';
 import { ImportProgressPanel } from './components/ImportProgressPanel';
 import { ImportModeDialog } from './components/ImportModeDialog';
-import { NoteView, type ListField } from './components/NoteView';
+import { NoteView, type ListChangeKind, type ListField } from './components/NoteView';
 import { NoteGenerationPanel } from './components/NoteGenerationPanel';
 import { EmphasisAnalysisPanel } from './components/EmphasisAnalysisPanel';
 import { SettingsView } from './components/SettingsView';
@@ -53,6 +53,12 @@ interface SubjectSummary {
   sampleTopics: string[];
 }
 
+interface NoteUndoEntry {
+  id: string;
+  label: string;
+  undo: () => void;
+}
+
 export default function App() {
   const [appVersion, setAppVersion] = useState('');
   const [updateState, setUpdateState] = useState<AppUpdateState>({
@@ -79,6 +85,7 @@ export default function App() {
   const [showGenerate, setShowGenerate] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
+  const noteUndoStack = useRef<NoteUndoEntry[]>([]);
 
   useEffect(() => {
     window.learnAgent.getAppInfo().then((info) => setAppVersion(info.version)).catch(() => setAppVersion('未知'));
@@ -102,6 +109,37 @@ export default function App() {
     },
     []
   );
+
+  const pushNoteUndo = useCallback((label: string, undo: () => void) => {
+    const id = createId('undo');
+    noteUndoStack.current = [...noteUndoStack.current, { id, label, undo }].slice(-50);
+    return id;
+  }, []);
+
+  const undoNoteChange = useCallback((entryId?: string) => {
+    const stack = noteUndoStack.current;
+    const index = entryId ? stack.findIndex((entry) => entry.id === entryId) : stack.length - 1;
+    if (index < 0) return false;
+    const [entry] = stack.splice(index, 1);
+    noteUndoStack.current = [...stack];
+    entry.undo();
+    pushToast('info', `已撤销：${entry.label}`);
+    return true;
+  }, [pushToast]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== 'z') return;
+      if (confirm || view !== 'note') return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (!noteUndoStack.current.length) return;
+      event.preventDefault();
+      undoNoteChange();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [confirm, undoNoteChange, view]);
 
   useEffect(() => {
     window.learnAgent.getUpdateState().then(setUpdateState).catch(() => undefined);
@@ -510,16 +548,14 @@ export default function App() {
   }
 
   function deleteSubject(subject: RailSubject) {
-    if (subject.noteCount > 0) {
-      setConfirm({
-        title: `删除学科「${subject.name}」`,
-        message: `这会一并删除该学科下的 ${subject.noteCount} 篇笔记和相关对话，且无法撤销。`,
-        confirmLabel: '删除学科',
-        onConfirm: () => performDeleteSubject(subject)
-      });
-      return;
-    }
-    performDeleteSubject(subject);
+    setConfirm({
+      title: `删除学科「${subject.name}」`,
+      message: subject.noteCount > 0
+        ? `这会一并删除该学科下的 ${subject.noteCount} 篇笔记和相关对话，且无法撤销。`
+        : '删除这个空学科后无法撤销。',
+      confirmLabel: '删除学科',
+      onConfirm: () => performDeleteSubject(subject)
+    });
   }
 
   function updateSelectedNote(mutator: (note: Note) => Note) {
@@ -625,13 +661,6 @@ export default function App() {
       (note) => note.id !== removed.id && cleanSubjectName(note.subject) === cleanSubjectName(removed.subject)
     );
 
-    setData((current) => ({
-      ...current,
-      notes: removeNoteWithPromotedChildren(current.notes, removed.id).notes,
-      conversations: current.conversations.filter((conversation) => conversation.noteId !== removed.id)
-    }));
-    setSelectedNoteId(remainingInSubject[0]?.id || '');
-
     const restore = () => {
       setData((current) => {
         if (current.notes.some((note) => note.id === removed.id)) return current;
@@ -648,8 +677,16 @@ export default function App() {
       setSelectedNoteId(removed.id);
     };
 
+    const undoId = pushNoteUndo('删除笔记', restore);
+    setData((current) => ({
+      ...current,
+      notes: removeNoteWithPromotedChildren(current.notes, removed.id).notes,
+      conversations: current.conversations.filter((conversation) => conversation.noteId !== removed.id)
+    }));
+    setSelectedNoteId(remainingInSubject[0]?.id || '');
+
     const detail = childCount ? `已删除「${removed.title || '未命名笔记'}」，${childCount} 篇子笔记已上移` : `已删除「${removed.title || '未命名笔记'}」`;
-    pushToast('info', detail, { action: { label: '撤销', onClick: restore }, duration: 8000 });
+    pushToast('info', detail, { action: { label: '撤销', onClick: () => undoNoteChange(undoId) }, duration: 8000 });
   }
 
   function moveNote(
@@ -659,9 +696,30 @@ export default function App() {
     targetTopic?: string,
     targetSubject?: string
   ) {
+    const movedAt = nowIso();
+    const preview = moveNoteInTree(data.notes, {
+      draggedId, targetId, placement, targetTopic, targetSubject, movedAt
+    });
+    if (preview === data.notes) return;
+    const hierarchyBefore = new Map(data.notes.map((note) => [note.id, {
+      parentId: note.parentId,
+      position: note.position,
+      subject: note.subject,
+      topic: note.topic,
+      updatedAt: note.updatedAt
+    }]));
+    pushNoteUndo('移动笔记', () => {
+      setData((current) => ({
+        ...current,
+        notes: current.notes.map((note) => {
+          const before = hierarchyBefore.get(note.id);
+          return before ? { ...note, ...before } : note;
+        })
+      }));
+    });
     setData((current) => {
       const notes = moveNoteInTree(current.notes, {
-        draggedId, targetId, placement, targetTopic, targetSubject, movedAt: nowIso()
+        draggedId, targetId, placement, targetTopic, targetSubject, movedAt
       });
       return notes === current.notes ? current : { ...current, notes };
     });
@@ -703,20 +761,67 @@ export default function App() {
   }
 
   function addSection() {
+    if (!selectedNote) return;
+    const noteId = selectedNote.id;
+    const section = { id: createId('section'), heading: '新小节', content: '' };
+    const undoId = pushNoteUndo('添加小节', () => {
+      setData((current) => ({
+        ...current,
+        notes: current.notes.map((note) => note.id === noteId
+          ? { ...note, sections: note.sections.filter((item) => item.id !== section.id), updatedAt: nowIso() }
+          : note)
+      }));
+    });
     updateSelectedNote((note) => ({
       ...note,
-      sections: [...note.sections, { id: createId('section'), heading: '新小节', content: '' }]
+      sections: [...note.sections, section]
     }));
+    return undoId;
   }
 
   function removeSection(sectionId: string) {
+    if (!selectedNote) return;
+    const noteId = selectedNote.id;
+    const index = selectedNote.sections.findIndex((section) => section.id === sectionId);
+    const removed = selectedNote.sections[index];
+    if (!removed) return;
+    const undoId = pushNoteUndo('删除小节', () => {
+      setData((current) => ({
+        ...current,
+        notes: current.notes.map((note) => {
+          if (note.id !== noteId || note.sections.some((section) => section.id === removed.id)) return note;
+          const sections = [...note.sections];
+          sections.splice(Math.min(index, sections.length), 0, removed);
+          return { ...note, sections, updatedAt: nowIso() };
+        })
+      }));
+    });
     updateSelectedNote((note) => ({
       ...note,
       sections: note.sections.filter((section) => section.id !== sectionId)
     }));
+    pushToast('info', `已删除小节「${removed.heading || '未命名小节'}」`, {
+      action: { label: '撤销', onClick: () => undoNoteChange(undoId) },
+      duration: 8000
+    });
   }
 
   function moveSection(sectionId: string, direction: -1 | 1) {
+    if (!selectedNote) return;
+    const noteId = selectedNote.id;
+    const previousOrder = selectedNote.sections.map((section) => section.id);
+    pushNoteUndo('移动小节', () => {
+      setData((current) => ({
+        ...current,
+        notes: current.notes.map((note) => {
+          if (note.id !== noteId) return note;
+          const byId = new Map(note.sections.map((section) => [section.id, section]));
+          const ordered = previousOrder.flatMap((id) => byId.get(id) ? [byId.get(id)!] : []);
+          const extras = note.sections.filter((section) => !previousOrder.includes(section.id));
+          return { ...note, sections: [...ordered, ...extras], updatedAt: nowIso() };
+        })
+      }));
+    });
     updateSelectedNote((note) => {
       const index = note.sections.findIndex((section) => section.id === sectionId);
       const nextIndex = index + direction;
@@ -728,7 +833,25 @@ export default function App() {
     });
   }
 
-  function updateList(field: ListField, values: string[]) {
+  function updateList(field: ListField, values: string[], kind: ListChangeKind = 'edit') {
+    if (kind !== 'edit' && selectedNote) {
+      const noteId = selectedNote.id;
+      const previousValues = [...selectedNote[field]];
+      const undoId = pushNoteUndo(kind === 'remove' ? '删除笔记条目' : '添加笔记条目', () => {
+        setData((current) => ({
+          ...current,
+          notes: current.notes.map((note) => note.id === noteId
+            ? { ...note, [field]: previousValues, updatedAt: nowIso() }
+            : note)
+        }));
+      });
+      if (kind === 'remove') {
+        pushToast('info', '已删除一项', {
+          action: { label: '撤销', onClick: () => undoNoteChange(undoId) },
+          duration: 8000
+        });
+      }
+    }
     updateSelectedNote((note) => ({ ...note, [field]: values }));
   }
 
@@ -1020,6 +1143,15 @@ export default function App() {
     }
   }
 
+  async function requestClearApiKey() {
+    setConfirm({
+      title: '清除 API Key',
+      message: '保存的 API Key 将从系统安全存储中永久删除，且无法撤销。',
+      confirmLabel: '清除密钥',
+      onConfirm: () => void clearApiKey()
+    });
+  }
+
   function updateTheme(nextTheme: ThemeId) {
     setData((current) => ({ ...current, settings: { ...current.settings, theme: nextTheme } }));
   }
@@ -1217,7 +1349,7 @@ export default function App() {
             onBack={() => setView('note')}
             onChange={updateSettings}
             onSetApiKey={setApiKey}
-            onClearApiKey={clearApiKey}
+            onClearApiKey={requestClearApiKey}
             onThemeChange={updateTheme}
             onTestConnection={testConnection}
             onExportSync={exportSyncPackage}
