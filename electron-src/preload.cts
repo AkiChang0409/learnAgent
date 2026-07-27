@@ -3,6 +3,15 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('learnAgent', {
   getAppInfo: () => ipcRenderer.invoke('app:info'),
+  getUpdateState: () => ipcRenderer.invoke('app:get-update-state'),
+  checkForUpdates: () => ipcRenderer.invoke('app:check-for-updates'),
+  downloadUpdate: () => ipcRenderer.invoke('app:download-update'),
+  installUpdate: () => ipcRenderer.invoke('app:install-update'),
+  onUpdateStatus: (handler) => {
+    const listener = (_event, status) => handler(status);
+    ipcRenderer.on('app:update-status', listener);
+    return () => ipcRenderer.removeListener('app:update-status', listener);
+  },
   loadSnapshot: () => ipcRenderer.invoke('data:load-snapshot'),
   applyChanges: (payload) => ipcRenderer.invoke('data:apply-changes', payload),
   flushData: () => ipcRenderer.invoke('data:flush'),

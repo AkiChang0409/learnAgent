@@ -11,6 +11,7 @@ const { createSyncPackage, mergeSyncData, validateSyncPackage } = require('./syn
 const { IMPORT_LIMITS, validateImportPreflight, estimatedImportCalls } = require('./import-limits.cjs');
 const { AGENT_REGISTRY } = require('./agent-registry.cjs');
 const { loadSafeSnapshot } = require('./key-migration.cjs');
+const { createUpdateManager } = require('./updater.cjs');
 const {
   buildAgentRetryPrompt,
   isAgentOutputError,
@@ -30,6 +31,7 @@ const markdownSelections = new Map();
 const canceledImports = new Set();
 const noteGenerationTasks = new Map();
 const emphasisAnalysisTasks = new Map();
+let updateManager = null;
 
 function getStorage() {
   if (!storage) {
@@ -41,6 +43,7 @@ function getStorage() {
 function createWindow() {
   const win = createSecureWindow({ app, baseDir: __dirname, isDev, isSmokeTest });
   mainWindow = win;
+  win.webContents.once('did-finish-load', () => updateManager?.scheduleAutomaticCheck());
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
   });
@@ -52,6 +55,8 @@ function getSecretStore() {
 }
 
 const handleIpc = createIpcRegistrar(ipcMain, () => mainWindow);
+updateManager = createUpdateManager({ app, getMainWindow: () => mainWindow });
+updateManager.initialize();
 const { callModel, aggregateUsageRecords } = createModelProvider(() => getSecretStore().getApiKey());
 
 async function runAgent(
@@ -2266,6 +2271,10 @@ async function loadRendererSnapshot() {
 }
 
 handleIpc('app:info', () => ({ version: app.getVersion(), name: app.getName() }));
+handleIpc('app:get-update-state', () => updateManager.getState());
+handleIpc('app:check-for-updates', () => updateManager.checkForUpdates());
+handleIpc('app:download-update', () => updateManager.downloadUpdate());
+handleIpc('app:install-update', () => updateManager.installUpdate());
 handleIpc('data:load-snapshot', () => loadRendererSnapshot());
 handleIpc('data:apply-changes', (_event, payload) => getStorage().applyChanges(payload));
 handleIpc('data:flush', () => getStorage().flushData());

@@ -185,7 +185,9 @@ learn-agent-data.backup-时间戳.json
 
 ## 发布版本
 
-项目已配置 GitHub Actions 自动发布。推送版本 tag 后，GitHub 会自动打包 Windows 安装包并上传到 Release。
+项目已配置 GitHub Actions 自动发布。推送版本 tag 后，GitHub 会自动打包 Windows 安装包，并把安装包、差分更新文件与 `latest.yml` 更新清单上传到 Release。
+
+正式安装版会在启动后自动检查 GitHub Release。发现新版本后会先提醒用户；用户点击“更新”后才在后台下载，下载完成后再提示重启安装。也可以在“设置 → 关于”中手动检查。开发环境不会请求更新服务。
 
 推荐流程：
 
@@ -203,7 +205,7 @@ git push origin --tags
 - 执行：`npm version patch`
 - 新版本：`1.0.3`
 - 新 tag：`v1.0.3`
-- GitHub Release 附件：`LearnAgent-1.0.3-Setup.exe`
+- GitHub Release 附件：`LearnAgent-1.0.3-Setup.exe`、对应的 `.blockmap` 和 `latest.yml`
 
 也可以手动创建 tag：
 ```powershell

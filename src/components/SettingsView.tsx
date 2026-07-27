@@ -11,12 +11,13 @@ import {
   Loader2,
   Palette,
   PlugZap,
+  RefreshCw,
   RotateCcw,
   SlidersHorizontal,
   Upload
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import type { AiProvider, AiSettings, ThemeId, TokenUsageRecord } from '../types';
+import type { AiProvider, AiSettings, AppUpdateState, ThemeId, TokenUsageRecord } from '../types';
 import { applyProviderPreset, providerDisplayName } from '../services/settings';
 import { THEMES } from '../theme';
 
@@ -81,6 +82,7 @@ export function SettingsView({
   usageRecords,
   dataPath,
   appVersion,
+  updateState,
   isTesting,
   isSyncing,
   onBack,
@@ -90,13 +92,17 @@ export function SettingsView({
   onThemeChange,
   onTestConnection,
   onExportSync,
-  onImportSync
+  onImportSync,
+  onCheckForUpdates,
+  onDownloadUpdate,
+  onInstallUpdate
 }: {
   settings: AiSettings;
   theme: ThemeId;
   usageRecords: TokenUsageRecord[];
   dataPath: string;
   appVersion: string;
+  updateState: AppUpdateState;
   isTesting: boolean;
   isSyncing: boolean;
   onBack: () => void;
@@ -107,6 +113,9 @@ export function SettingsView({
   onTestConnection: () => void;
   onExportSync: () => void;
   onImportSync: () => void;
+  onCheckForUpdates: () => void;
+  onDownloadUpdate: () => void;
+  onInstallUpdate: () => void;
 }) {
   const [section, setSection] = useState<Section>('appearance');
   const [showApiKey, setShowApiKey] = useState(false);
@@ -384,6 +393,38 @@ export function SettingsView({
                   <span>存储方式</span>
                   <strong>本地 SQLite</strong>
                 </div>
+              </div>
+              <div className={`update-card ${updateState.status}`}>
+                <div>
+                  <strong>应用更新</strong>
+                  <span>{updateState.message}</span>
+                  {updateState.status === 'downloading' && (
+                    <progress max="100" value={updateState.percent || 0}>
+                      {Math.round(updateState.percent || 0)}%
+                    </progress>
+                  )}
+                </div>
+                {updateState.status === 'downloaded' ? (
+                  <button className="secondary-action" type="button" onClick={onInstallUpdate}>
+                    <RotateCcw size={16} />
+                    重启并安装
+                  </button>
+                ) : updateState.status === 'available' ? (
+                  <button className="secondary-action" type="button" onClick={onDownloadUpdate}>
+                    <Download size={16} />
+                    更新
+                  </button>
+                ) : (
+                  <button
+                    className="secondary-action"
+                    type="button"
+                    onClick={onCheckForUpdates}
+                    disabled={updateState.status === 'checking' || updateState.status === 'downloading'}
+                  >
+                    <RefreshCw className={updateState.status === 'checking' ? 'spin' : ''} size={16} />
+                    检查更新
+                  </button>
+                )}
               </div>
             </section>
           )}

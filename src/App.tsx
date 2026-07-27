@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FilePlus2, Loader2, Sparkles, Upload } from 'lucide-react';
 import type {
   AiSettings,
+  AppUpdateState,
   ChatMessage,
   Conversation,
   EmphasisAnalysisProgress,
@@ -54,6 +55,10 @@ interface SubjectSummary {
 
 export default function App() {
   const [appVersion, setAppVersion] = useState('');
+  const [updateState, setUpdateState] = useState<AppUpdateState>({
+    status: 'idle',
+    message: '将在后台自动检查更新'
+  });
   const { data, setData, selectedNoteId, setSelectedNoteId, dataPath, isReady, loadError, revision } = useAppData();
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [composer, setComposer] = useState('');
@@ -97,6 +102,24 @@ export default function App() {
     },
     []
   );
+
+  useEffect(() => {
+    window.learnAgent.getUpdateState().then(setUpdateState).catch(() => undefined);
+    return window.learnAgent.onUpdateStatus((nextState) => {
+      setUpdateState(nextState);
+      if (nextState.status === 'available') {
+        pushToast('info', nextState.message, {
+          action: { label: '更新', onClick: () => void downloadUpdate() },
+          duration: 15_000
+        });
+      } else if (nextState.status === 'downloaded') {
+        pushToast('success', nextState.message, {
+          action: { label: '立即重启', onClick: () => void window.learnAgent.installUpdate() },
+          duration: 15_000
+        });
+      }
+    });
+  }, [pushToast]);
 
   useEffect(() => window.learnAgent.onNoteGenerationProgress((progress) => {
     setNoteGenerationTasks((current) => {
@@ -1055,6 +1078,34 @@ export default function App() {
     }
   }
 
+  async function checkForUpdates() {
+    try {
+      const state = await window.learnAgent.checkForUpdates();
+      setUpdateState(state);
+    } catch (error) {
+      pushToast('error', `检查更新失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function installUpdate() {
+    try {
+      const result = await window.learnAgent.installUpdate();
+      if (!result.ok) pushToast('error', result.message || '更新尚未准备好');
+    } catch (error) {
+      pushToast('error', `安装更新失败：${errorMessage(error)}`);
+    }
+  }
+
+  async function downloadUpdate() {
+    try {
+      const result = await window.learnAgent.downloadUpdate();
+      setUpdateState(result.state);
+      if (!result.ok) pushToast('error', result.message || '暂时无法下载更新');
+    } catch (error) {
+      pushToast('error', `下载更新失败：${errorMessage(error)}`);
+    }
+  }
+
   async function exportSyncPackage() {
     if (isSyncing) return;
     setIsSyncing(true);
@@ -1160,6 +1211,7 @@ export default function App() {
             usageRecords={data.usageRecords}
             dataPath={dataPath}
             appVersion={appVersion || '…'}
+            updateState={updateState}
             isTesting={isTestingConnection}
             isSyncing={isSyncing}
             onBack={() => setView('note')}
@@ -1170,6 +1222,9 @@ export default function App() {
             onTestConnection={testConnection}
             onExportSync={exportSyncPackage}
             onImportSync={importSyncPackage}
+            onCheckForUpdates={() => void checkForUpdates()}
+            onDownloadUpdate={() => void downloadUpdate()}
+            onInstallUpdate={() => void installUpdate()}
           />
         ) : selectedNote ? (
           <NoteView

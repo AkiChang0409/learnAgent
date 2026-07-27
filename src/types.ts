@@ -483,6 +483,11 @@ export interface SyncImportResult {
 
 export interface LearnAgentBridge {
   getAppInfo: () => Promise<{ version: string; name: string }>;
+  getUpdateState: () => Promise<AppUpdateState>;
+  checkForUpdates: () => Promise<AppUpdateState>;
+  downloadUpdate: () => Promise<{ ok: boolean; state: AppUpdateState; message?: string }>;
+  installUpdate: () => Promise<{ ok: boolean; message?: string }>;
+  onUpdateStatus: (handler: (state: AppUpdateState) => void) => () => void;
   loadSnapshot: () => Promise<{ data: AppData; revision: number }>;
   applyChanges: (payload: { baseRevision: number; changes: AppDataChanges }) => Promise<{ revision: number; durable: boolean }>;
   flushData: () => Promise<{ revision: number; durable: boolean }>;
@@ -523,6 +528,13 @@ export interface LearnAgentBridge {
   }) => Promise<NoteDistillationResult>;
   testConnection: (payload: { settings: AiSettings }) => Promise<AiConnectionTestResult>;
   getDataFilePath: () => Promise<string>;
+}
+
+export interface AppUpdateState {
+  status: 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error' | 'disabled';
+  message: string;
+  version?: string;
+  percent?: number;
 }
 
 declare global {
