@@ -6,6 +6,7 @@ import {
   FileText,
   Folder,
   GripVertical,
+  Lightbulb,
   Loader2,
   Pencil,
   Plus,
@@ -113,6 +114,7 @@ export function AppRail({
   currentSubjectTopics,
   selectedNoteId,
   isSettingsOpen,
+  isTipsOpen,
   noteSearch,
   searchResults,
   saveState,
@@ -130,6 +132,7 @@ export function AppRail({
   onNewBlank,
   onNewGenerate,
   onImport,
+  onOpenTips,
   onOpenSettings
 }: {
   notes: Note[];
@@ -138,6 +141,7 @@ export function AppRail({
   currentSubjectTopics: string[];
   selectedNoteId: string;
   isSettingsOpen: boolean;
+  isTipsOpen: boolean;
   noteSearch: string;
   searchResults: Note[];
   saveState: SaveState;
@@ -161,6 +165,7 @@ export function AppRail({
   onNewBlank: () => void;
   onNewGenerate: () => void;
   onImport: () => void;
+  onOpenTips: () => void;
   onOpenSettings: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -643,14 +648,25 @@ export function AppRail({
       </nav>
 
       <div className="rail-foot">
-        <button
-          className={`rail-foot-btn ${isSettingsOpen ? 'active' : ''}`}
-          type="button"
-          onClick={onOpenSettings}
-        >
-          <Settings size={16} />
-          设置
-        </button>
+        <div className="rail-foot-tools" role="toolbar" aria-label="应用工具栏">
+          <button
+            className={`rail-foot-btn ${isTipsOpen ? 'active' : ''}`}
+            type="button"
+            onClick={onOpenTips}
+            aria-pressed={isTipsOpen}
+          >
+            <Lightbulb size={16} />
+            小贴士
+          </button>
+          <button
+            className={`rail-foot-btn ${isSettingsOpen ? 'active' : ''}`}
+            type="button"
+            onClick={onOpenSettings}
+          >
+            <Settings size={16} />
+            设置
+          </button>
+        </div>
         <span className={`save-dot ${saveState}`} title={saveStateLabel(saveState)} aria-live="polite">
           {saveState === 'saving' ? <Loader2 className="spin" size={13} /> : null}
           {saveStateLabel(saveState)}

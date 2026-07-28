@@ -1255,6 +1255,12 @@ textarea {
   color: var(--danger-text);
 }
 
+.rail-foot-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .rail-save-retry {
   border: 0;
   background: transparent;
@@ -1262,6 +1268,205 @@ textarea {
   cursor: pointer;
   font-size: 12px;
   text-decoration: underline;
+}
+
+/* ===== Tips library ===================================================== */
+
+.tips-dialog {
+  width: min(820px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  animation: pop-in 180ms ease;
+}
+
+.tips-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tips-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tips-title > span {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  color: var(--mark-on);
+  background: var(--mark-soft);
+  border: 1px solid var(--mark);
+}
+
+.tips-title h2,
+.tips-title p,
+.tip-card h3,
+.tip-card p {
+  margin: 0;
+}
+
+.tips-title h2 {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 20px;
+}
+
+.tips-title p {
+  margin-top: 3px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+
+.tips-body {
+  overflow: auto;
+  padding: 20px;
+  background: var(--paper);
+}
+
+.tip-card {
+  padding: 20px;
+  border: 1px solid var(--accent-soft-border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.tip-card-top,
+.tip-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tip-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: var(--accent-soft-text);
+  background: var(--accent-soft-bg);
+  border: 1px solid var(--accent-soft-border);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.tip-index {
+  color: var(--ink-faint);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tip-card h3 {
+  margin-top: 16px;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 21px;
+}
+
+.tip-summary {
+  margin-top: 8px !important;
+  color: var(--ink-soft);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.tip-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tip-steps li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 9px;
+  align-items: start;
+  padding: 12px;
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+  color: var(--ink-body);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.tip-steps strong {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  font-size: 11px;
+}
+
+.tip-steps code {
+  color: var(--accent-soft-text);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.tip-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.tip-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tip-preview {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-inset);
+}
+
+.tip-preview summary {
+  cursor: pointer;
+  color: var(--ink-body);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tip-preview pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 12px 0 0;
+  padding: 12px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  font: 11.5px/1.65 ui-monospace, SFMono-Regular, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+@media (max-width: 720px) {
+  .tip-steps {
+    grid-template-columns: 1fr;
+  }
 }
 
 .note-keyboard-move {

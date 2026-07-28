@@ -25,6 +25,7 @@ import { NoteGenerationPanel } from './components/NoteGenerationPanel';
 import { EmphasisAnalysisPanel } from './components/EmphasisAnalysisPanel';
 import { SettingsView } from './components/SettingsView';
 import { ToastHost, type ToastMessage } from './components/ToastHost';
+import { TipsDialog } from './components/TipsDialog';
 import { useAppData } from './hooks/useAppData';
 import { useAutosave } from './hooks/useAutosave';
 import { useKnowledgeImport } from './hooks/useKnowledgeImport';
@@ -69,6 +70,7 @@ export default function App() {
   const [selectedSubject, setSelectedSubject] = useState<string | null>(null);
   const [composer, setComposer] = useState('');
   const [noteSearch, setNoteSearch] = useState('');
+  const [showTips, setShowTips] = useState(false);
   const [searchResults, setSearchResults] = useState<Note[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -1315,6 +1317,7 @@ export default function App() {
         currentSubjectTopics={currentSubjectTopics}
         selectedNoteId={selectedNoteId}
         isSettingsOpen={view === 'settings'}
+        isTipsOpen={showTips}
         noteSearch={noteSearch}
         searchResults={searchResults}
         saveState={saveState}
@@ -1332,6 +1335,7 @@ export default function App() {
         onNewBlank={() => createBlankNote()}
         onNewGenerate={openGenerate}
         onImport={importMarkdown}
+        onOpenTips={() => setShowTips(true)}
         onOpenSettings={() => setView((current) => (current === 'settings' ? 'note' : 'settings'))}
       />
 
@@ -1452,6 +1456,12 @@ export default function App() {
       />
 
       <ImportModeDialog selection={sourceSelection} onStart={startImport} onClose={cancelImport} />
+
+      <TipsDialog
+        open={showTips}
+        onClose={() => setShowTips(false)}
+        onCopied={() => pushToast('success', '已复制 Codex 项目分析 Skill，可粘贴到你的 Codex 项目中')}
+      />
 
       <ConfirmDialog request={confirm} onCancel={() => setConfirm(null)} />
 
