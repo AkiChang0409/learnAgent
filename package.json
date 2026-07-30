@@ -1,6 +1,6 @@
 {
   "name": "learn-agent",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
   "description": "Local desktop app for agent-assisted learning notes, summaries, and RAG chat.",
   "main": "electron-dist/main.cjs",
