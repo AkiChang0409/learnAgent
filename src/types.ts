@@ -229,6 +229,8 @@ export interface NoteTask {
   objective: string;
   mustCover: string[];
   expectedSections: string[];
+  reasoningQuestions: string[];
+  extensionDirections: string[];
   requiredEvidenceIds: string[];
   avoid: string[];
 }

@@ -216,8 +216,8 @@ export function useKnowledgeImport({
   async function cancelImport() {
     if (!sourceSelection && !activeSelectionId.current) return;
     const selectionId = sourceSelection?.selectionId || activeSelectionId.current;
-    await window.learnAgent.cancelMarkdownImport({ selectionId });
     setSourceSelection(null);
+    await window.learnAgent.cancelMarkdownImport({ selectionId });
   }
 
   return {

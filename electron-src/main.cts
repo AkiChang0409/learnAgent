@@ -625,22 +625,30 @@ function chunkMarkdown(markdown, maxChars = 9000) {
 
 function createProjectBrief(fileName, markdown) {
   const cleanName = path.basename(fileName, path.extname(fileName)) || 'Markdown 文档';
+  const isProject = inferMarkdownSubject(fileName, markdown) === '项目技术方案';
   return {
     projectName: cleanName,
-    projectType: inferMarkdownSubject(fileName, markdown) === '项目技术方案'
+    projectType: isProject
       ? '项目技术方案 / 开发日志'
       : '学习资料 / 知识文档',
-    targetAudience: 'interview',
-    qualityGoal: '提炼项目亮点、工程取舍、实现难点、可复用经验，避免普通功能说明。'
+    targetAudience: isProject ? '技术复盘与面试' : '深入学习与迁移应用',
+    qualityGoal: isProject
+      ? '提炼项目亮点、工程取舍、实现难点、可复用经验，避免普通功能说明。'
+      : '建立概念关系、解释原理与适用边界、补充易错点和迁移应用，避免浅层摘要。'
   };
 }
 
-function globalImportConstraints() {
+function globalImportConstraints(projectBrief) {
+  const focus = String(projectBrief?.projectType || '').includes('项目技术方案')
+    ? '优先提炼项目亮点、技术价值、难点、解决方案和工程取舍。'
+    : '优先提炼概念关系、底层原理、适用条件、推导链、易混淆点和迁移应用。';
   return [
     '输出使用中文。',
     '不要编造原始材料中不存在的技术细节、指标或结果。',
-    '优先提炼项目亮点、技术价值、难点、解决方案和工程取舍。',
-    '避免普通功能说明，内容应适合技术复盘和面试表达。',
+    '严格区分三层内容：材料事实必须有 evidence；基于 evidence 的合理推演必须标注“可推断”；通用知识、替代方案和演进建议必须标注“拓展思考”，不得写成材料已经证明的事实。',
+    '不要因“不得编造”而停止分析；可以解释因果、约束、失败边界、替代方案和迁移条件，但必须遵守上述标签与事实边界。',
+    focus,
+    '避免普通功能说明和同义重复；每个价值判断都要解释具体机制，内容应适合技术复盘和面试表达。',
     '所有 Agent 输出必须是 JSON 对象，不要输出 Markdown 包裹。'
   ];
 }
@@ -813,6 +821,8 @@ function localSubjectPlan(fileName, markdown, evidenceItems) {
           objective: `生成一篇关于“${topicTitle}”的项目技术笔记。`,
           mustCover: ['问题背景', '实现机制', '技术价值', '工程取舍'],
           expectedSections: ['问题背景', '实现机制', '技术价值与取舍'],
+          reasoningQuestions: ['为什么采用这个机制？', '关键模块和数据如何协作？', '失败或证据不足时会怎样？'],
+          extensionDirections: ['替代方案与适用条件', '可演进方向与迁移触发条件'],
           requiredEvidenceIds: ids,
           avoid: ['不要写成普通功能清单', '不要编造材料中不存在的实现细节']
         }]
@@ -853,6 +863,8 @@ function normalizeSubjectPlan(value, fileName, markdown, evidenceItems) {
       objective: `生成一篇关于“${title}”的项目技术笔记。`,
       mustCover: ['问题背景', '实现机制', '技术价值'],
       expectedSections: ['问题背景', '实现机制', '技术价值'],
+      reasoningQuestions: ['为什么需要这个设计？', '它的失败边界是什么？'],
+      extensionDirections: ['替代方案与演进条件'],
       requiredEvidenceIds: topicIds
     }]).slice(0, 4).map((task, taskIndex) => {
       const taskIds = normalizeIdList(task?.requiredEvidenceIds, allowedIds);
@@ -862,6 +874,12 @@ function normalizeSubjectPlan(value, fileName, markdown, evidenceItems) {
         objective: String(task?.objective || `生成一篇关于“${title}”的项目技术笔记。`).trim(),
         mustCover: asStringList(task?.mustCover).length ? asStringList(task.mustCover) : ['问题背景', '实现机制', '技术价值'],
         expectedSections: asStringList(task?.expectedSections).length ? asStringList(task.expectedSections) : ['问题背景', '实现机制', '技术价值'],
+        reasoningQuestions: asStringList(task?.reasoningQuestions).length
+          ? asStringList(task.reasoningQuestions)
+          : ['为什么需要这个设计？', '模块和数据如何协作？', '失败边界与不适用条件是什么？'],
+        extensionDirections: asStringList(task?.extensionDirections).length
+          ? asStringList(task.extensionDirections)
+          : ['拓展思考：替代方案、演进路径与迁移条件'],
         requiredEvidenceIds: taskIds.length ? taskIds : topicIds,
         avoid: asStringList(task?.avoid).length ? asStringList(task.avoid) : ['不要写成普通功能清单', '不要编造材料中不存在的实现细节']
       };
@@ -1015,13 +1033,27 @@ function normalizeValidationReport(value) {
 function localValidationReport(subjectPlan, notes) {
   const issues = [];
   notes.forEach(({ core, enrichment }) => {
-    if (!core.sections?.length) {
+    const sectionText = (core.sections || []).map((section) => `${section.heading}\n${section.content}`).join('\n');
+    if (!core.sections?.length || core.sections.length < 4 || sectionText.length < 500) {
       issues.push({
         severity: 'major',
         targetId: core.taskId,
         type: 'bad-structure',
-        message: '核心笔记缺少正文小节。',
-        suggestedFix: '重新生成正文小节。',
+        message: '核心笔记的正文结构或解释密度不足。',
+        suggestedFix: '至少用四个职责不同的小节讲清实现机制、数据或协作链、工程取舍、失败边界以及拓展思考，避免重复摘要。',
+        relatedEvidenceIds: core.usedEvidenceIds || []
+      });
+    }
+    const hasMechanism = /实现|机制|原理|过程|关系|流程|数据流|调用链|状态|模块|协作|推导/.test(sectionText);
+    const hasReasoning = /为什么|因此|意味着|可推断|取舍|约束|边界|失败/.test(sectionText);
+    const hasExtension = /拓展思考|替代方案|演进|迁移|适用条件|不适用/.test(sectionText);
+    if (!hasMechanism || !hasReasoning || !hasExtension) {
+      issues.push({
+        severity: 'major',
+        targetId: core.taskId,
+        type: 'too-generic',
+        message: '正文仍偏向事实复述，缺少机制、因果推理或明确标注的拓展思考。',
+        suggestedFix: '基于已有 evidence 补足“为什么—如何运作—失败边界—设计取舍”的解释链，并把合理推断和通用拓展分别明确标注。',
         relatedEvidenceIds: core.usedEvidenceIds || []
       });
     }
@@ -1040,11 +1072,31 @@ function localValidationReport(subjectPlan, notes) {
     ok: !issues.some((issue) => issue.severity === 'major'),
     score: issues.length ? 78 : 92,
     issues,
-    rewriteTasks: []
+    rewriteTasks: issues.filter((issue) => issue.severity === 'major').slice(0, 1).map((issue) => ({
+      agentId: 'project.analysis-master',
+      targetId: issue.targetId,
+      instruction: issue.suggestedFix,
+      requiredEvidenceIds: issue.relatedEvidenceIds
+    }))
+  };
+}
+
+function mergeValidationReports(modelReport, localReport) {
+  const issues = [...(modelReport.issues || [])];
+  for (const issue of localReport.issues || []) {
+    if (!issues.some((current) => current.targetId === issue.targetId && current.type === issue.type)) issues.push(issue);
+  }
+  return {
+    ok: Boolean(modelReport.ok && localReport.ok),
+    score: Math.min(modelReport.score, localReport.score),
+    issues: issues.slice(0, 20),
+    rewriteTasks: (modelReport.rewriteTasks?.length ? modelReport.rewriteTasks : localReport.rewriteTasks).slice(0, 1)
   };
 }
 
 function buildProjectAnalysisContext(fileName, markdown, headings, chunks, evidenceBatches, evidenceItems, critique = null) {
+  const documentType = inferMarkdownSubject(fileName, markdown);
+  const projectLike = documentType === '项目技术方案';
   const headingStructure = headings
     .map((heading) => `${'  '.repeat(Math.max(heading.level - 1, 0))}- ${heading.title}`)
     .join('\n') || '无明显标题结构';
@@ -1062,17 +1114,24 @@ function buildProjectAnalysisContext(fileName, markdown, headings, chunks, evide
 
   return {
     fileName,
-    documentType: inferMarkdownSubject(fileName, markdown),
+    documentType,
     headingStructure,
     chunkCount: chunks.length,
     chunkSummaries,
     evidenceCards: evidenceItems.map(compactEvidenceItem),
     keyExcerpts,
     qualityGoal: [
-      '产出的是项目技术分析笔记，不是 Markdown 目录整理。',
-      '必须推理需求和技术实现之间的关系。',
-      '必须讲清技术架构、数据流、模块实现、难点、解决方案、工程取舍和项目亮点。',
-      '必须包含面试官视角的追问、易错点和案例。',
+      ...(projectLike ? [
+        '产出的是项目技术分析笔记，不是 Markdown 目录整理。',
+        '必须推理需求和技术实现之间的关系。',
+        '必须讲清技术架构、数据流、模块实现、难点、解决方案、工程取舍和项目亮点。'
+      ] : [
+        '产出的是深入学习笔记，不是 Markdown 目录整理或章节摘要。',
+        '必须讲清概念关系、底层原理、推导过程、适用条件、局限、易混淆点和迁移应用。'
+      ]),
+      '必须包含有追问价值的问题、易错点和案例。',
+      '必须形成“事实证据 -> 实现机制 -> 原因与取舍 -> 影响与边界”的解释链，而不是只回答是什么。',
+      '允许做有价值的合理推演和知识拓展：推演标注“可推断”，通用替代方案或演进建议放入“拓展思考”，不得伪装成项目事实。',
       '不要输出“原文摘要”“关键内容”“技术线索”等摘录式模板。'
     ],
     critique
@@ -1098,32 +1157,46 @@ function normalizeAnalysisCriticReport(value) {
   };
 }
 
-function localAnalysisCriticReport(knowledgeMap) {
+function localAnalysisCriticReport(knowledgeMap, documentType = '项目技术方案') {
   const notes = (knowledgeMap?.topics || []).flatMap((topic) => topic.notes || []);
+  const projectLike = documentType === '项目技术方案';
   const issueMessages = [];
   const serialized = JSON.stringify(knowledgeMap || {});
   if (/原文摘要|关键内容|技术线索/.test(serialized)) {
     issueMessages.push('输出包含摘录式模板标题。');
   }
-  if (notes.length < 5) {
-    issueMessages.push('分析笔记数量不足，未形成完整项目技术分析。');
+  if (notes.length < 3) {
+    issueMessages.push('分析笔记数量不足，尚未形成完整的知识结构。');
   }
   if (notes.some((note) => !Array.isArray(note.sections) || note.sections.length < 4)) {
     issueMessages.push('存在笔记缺少分块讲解，正文不能只放在知识总结里。');
   }
   const weakNotes = notes.filter((note) => {
     const text = [note.summary, ...(note.sections || []).map((section) => `${section.heading}\n${section.content}`)].join('\n');
-    return !/需求|问题|背景/.test(text) || !/实现|架构|数据|模块|流程/.test(text) || !/取舍|价值|亮点|优化|扩展/.test(text);
+    return projectLike
+      ? !/需求|问题|背景/.test(text) || !/实现|架构|数据|模块|流程/.test(text) || !/取舍|价值|亮点|优化|扩展/.test(text)
+      : !/概念|问题|背景|目标/.test(text) || !/原理|机制|过程|关系|方法|推导/.test(text) || !/边界|适用|局限|应用|拓展|误区/.test(text);
   });
   if (weakNotes.length > Math.max(1, notes.length / 2)) {
     issueMessages.push('多数笔记没有同时覆盖需求/问题、技术实现、价值/取舍和优化方向。');
+  }
+  const shallowNotes = notes.filter((note) => {
+    const sections = note.sections || [];
+    const text = [note.summary, ...sections.map((section) => `${section.heading}\n${section.content}`)].join('\n');
+    return sections.length < 4 || text.length < 650 ||
+      !/实现|机制|原理|过程|关系|流程|数据流|模块|协作|推导/.test(text) ||
+      !/为什么|因此|意味着|可推断|取舍|约束|边界|失败/.test(text) ||
+      !/拓展思考|替代方案|演进|迁移|适用条件/.test(text);
+  });
+  if (shallowNotes.length > Math.max(1, notes.length / 3)) {
+    issueMessages.push('多数笔记仍停留在“是什么”，缺少机制、因果推理、失败边界或明确标注的拓展思考。');
   }
   const issues = issueMessages.map((message, index) => ({
     severity: index === 0 ? 'blocker' : 'major',
     targetId: 'analysis',
     type: 'too-generic',
     message,
-    suggestedFix: '请整体重写，必须从项目目标、需求映射、技术实现、工程取舍和面试表达角度分析。',
+    suggestedFix: '请整体重写：用 evidence 建立事实到机制、原因、取舍、影响与边界的解释链；合理推断标注“可推断”，替代方案和演进建议放在“拓展思考”。',
     relatedEvidenceIds: []
   }));
   return {
@@ -1146,7 +1219,7 @@ async function runMultiAgentMarkdownImport(
 ) {
   const projectBrief = createProjectBrief(fileName, markdown);
   const sourceManifest = sourceManifestFor(fileName, chunks);
-  const globalConstraints = globalImportConstraints();
+  const globalConstraints = globalImportConstraints(projectBrief);
   const job = createAgentJob(projectBrief, sourceManifest, 'fast', estimatedImportCalls('fast', chunks.length));
   const progress = (value) => onProgress({ ...value, runId: job.id });
   const usageRecords = [];
@@ -1229,9 +1302,15 @@ async function runMultiAgentMarkdownImport(
       evidence: analysisContext.evidenceCards,
       instruction: [
         '请生成完整 SubjectKnowledgeMap。',
-        '第一篇 note 必须是“项目整体技术分析”。',
+        analysisContext.documentType === '项目技术方案'
+          ? '第一篇 note 必须是“项目整体技术分析”。'
+          : '第一篇 note 必须建立“全局知识框架”，讲清核心概念及其关系。',
         '后续笔记按分析逻辑生成，不要复制原文目录。',
-        '每篇笔记都必须讲清：需求或问题背景、对应技术实现、关键设计取舍、项目亮点或面试价值、可继续优化方向。',
+        analysisContext.documentType === '项目技术方案'
+          ? '每篇笔记都必须形成解释链：需求或约束 -> 技术实现与数据/协作流程 -> 为什么这样设计 -> 结果、取舍与失败边界。'
+          : '每篇笔记都必须形成解释链：问题或概念 -> 原理与关系 -> 推导或应用过程 -> 适用条件、局限与迁移场景。',
+        '不要只总结 evidence；跨 evidence 得出的合理结论明确标注“可推断”，通用原理、替代方案、迁移条件和演进方向放入“拓展思考”。',
+        '每个 section 要承担不同分析任务，避免摘要、正文、案例和易错点反复改写同一事实。',
         'cases、pitfalls、interviewQuestions 由你基于整体理解生成，不要留空。'
       ].join('\n')
     }),
@@ -1266,8 +1345,10 @@ async function runMultiAgentMarkdownImport(
         },
         evidence: evidenceItems.map(compactEvidenceItem),
         instruction: [
-          '请生成项目分析质量报告。',
-          '如果只是复述目录、缺少需求与技术实现关系、缺少技术价值或出现摘录式模板，必须判为不合格。',
+          '请生成内容分析质量报告。',
+          analysisContext.documentType === '项目技术方案'
+            ? '如果只是复述目录、缺少需求与技术实现关系、缺少技术价值或出现摘录式模板，必须判为不合格。'
+            : '如果只是复述目录、缺少概念关系、原理、适用边界、易混淆点或迁移应用，必须判为不合格。',
           '如果不合格，请给出面向 project.analysis-master 的整体 rewriteInstruction。'
         ].join('\n')
       }),
@@ -1275,10 +1356,13 @@ async function runMultiAgentMarkdownImport(
       { json: true }
     );
     if (criticResult.usageRecord) usageRecords.push(criticResult.usageRecord);
-    criticReport = normalizeAnalysisCriticReport(criticResult.json);
+    criticReport = mergeAnalysisCriticReports(
+      normalizeAnalysisCriticReport(criticResult.json),
+      localAnalysisCriticReport(knowledgeMap, analysisContext.documentType)
+    );
   } catch (error) {
     console.warn('Analysis critic failed, using local validation:', error);
-    criticReport = localAnalysisCriticReport(knowledgeMap);
+    criticReport = localAnalysisCriticReport(knowledgeMap, analysisContext.documentType);
   }
 
   if (!criticReport.ok) {
@@ -1313,7 +1397,8 @@ async function runMultiAgentMarkdownImport(
         instruction: [
           '这是整体重写。上一版质量校验未通过。',
           criticReport.rewriteInstruction || criticReport.issues.map((issue) => `${issue.message} ${issue.suggestedFix}`).join('\n'),
-          '请重新生成完整 SubjectKnowledgeMap。不要局部修补，不要复述原文目录。'
+          '请重新生成完整 SubjectKnowledgeMap。不要局部修补，不要复述原文目录。',
+          '事实、可推断结论和拓展思考必须明确分层；增加解释深度，但不要增加未经 evidence 支撑的项目事实。'
         ].join('\n\n')
       }),
       'import-markdown',
@@ -1948,6 +2033,20 @@ async function parallelMapLimit(items, limit, mapper) {
   return results;
 }
 
+function mergeAnalysisCriticReports(modelReport, localReport) {
+  const issues = [...(modelReport.issues || [])];
+  for (const issue of localReport.issues || []) {
+    if (!issues.some((current) => current.type === issue.type && current.message === issue.message)) issues.push(issue);
+  }
+  const rewriteInstruction = [modelReport.rewriteInstruction, localReport.rewriteInstruction].filter(Boolean).join('\n');
+  return {
+    ok: Boolean(modelReport.ok && localReport.ok),
+    score: Math.min(modelReport.score, localReport.score),
+    issues: issues.slice(0, 20),
+    rewriteInstruction
+  };
+}
+
 function plainNoteForModel(note) {
   return {
     id: note?.id,
@@ -2063,7 +2162,7 @@ function normalizeGeneratedNote(value, fallback) {
 async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, onProgress, isCanceled) {
   const projectBrief = createProjectBrief(fileName, markdown);
   const sourceManifest = sourceManifestFor(fileName, chunks);
-  const globalConstraints = globalImportConstraints();
+  const globalConstraints = globalImportConstraints(projectBrief);
   const job = createAgentJob(projectBrief, sourceManifest, 'deep', estimatedImportCalls('deep', chunks.length));
   const usageRecords = [];
   let completedChunks = 0;
@@ -2126,7 +2225,12 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
     projectBrief, sourceManifest, globalConstraints,
     task: { fileName, evidenceCount: evidenceItems.length },
     evidence: evidenceItems.map(compactEvidenceItem),
-    instruction: '生成最多 8 个主题、每主题最多 2 篇核心笔记的 SubjectPlan。'
+    instruction: [
+      '生成最多 8 个主题、每主题最多 2 篇核心笔记的 SubjectPlan。',
+      '不要照抄 Markdown 目录；优先组合跨 chunk evidence，规划能解释因果、数据流、架构协作、工程取舍和失败边界的主题。',
+      '每个 noteTask 填写 reasoningQuestions 和 extensionDirections，引导 Writer 做明确标注的可推断分析与拓展思考。',
+      '宁可减少重复主题，也不要拆出多篇浅显笔记。'
+    ].join('\n')
   }), 'import-markdown', { json: true });
   if (planResult.usageRecord) usageRecords.push(planResult.usageRecord);
   const plan = normalizeSubjectPlan(planResult.json, fileName, markdown, evidenceItems);
@@ -2151,7 +2255,12 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
     const evidencePack = buildEvidencePack(noteTask, topic, evidenceItems);
     const coreResult = await runAgentStep(settings, job.id, 'topic.note-writer', buildAgentUserPrompt({
       projectBrief, sourceManifest, globalConstraints, task: noteTask,
-      evidence: evidencePack.map(compactEvidenceItem), instruction: '完成当前一篇 CoreNoteDraft。'
+      evidence: evidencePack.map(compactEvidenceItem),
+      instruction: [
+        '完成当前一篇 CoreNoteDraft。',
+        '逐一回答 noteTask.reasoningQuestions，并围绕 extensionDirections 生成“拓展思考”，但不得把通用方案写成当前项目事实。',
+        '正文要解释机制、协作或数据变化、设计原因、失败边界和取舍；合理推演必须标注“可推断”。'
+      ].join('\n')
     }), 'import-markdown', { json: true });
     if (coreResult.usageRecord) usageRecords.push(coreResult.usageRecord);
     const core = normalizeCoreNoteDraft(coreResult.json, noteTask, topic, plan.subject, evidencePack);
@@ -2160,7 +2269,8 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
     try {
       const enrichResult = await runAgentStep(settings, job.id, 'note.enricher', buildAgentUserPrompt({
         projectBrief, sourceManifest, globalConstraints, task: { noteTask, core },
-        evidence: evidencePack.map(compactEvidenceItem), instruction: '补充 NoteEnrichment。'
+        evidence: evidencePack.map(compactEvidenceItem),
+        instruction: '补充 NoteEnrichment。案例写清触发条件、处理链路、结果和失败分支；面试问题追问理由、边界、替代方案和迁移条件，避免仅让用户复述正文。'
       }), 'import-markdown', { json: true });
       if (enrichResult.usageRecord) usageRecords.push(enrichResult.usageRecord);
       enrichment = normalizeNoteEnrichment(enrichResult.json, noteTask, core, evidencePack);
@@ -2203,10 +2313,14 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
     const validationResult = await runAgentStep(settings, job.id, 'knowledge.validator', buildAgentUserPrompt({
       projectBrief, sourceManifest, globalConstraints,
       task: { plan, notes: written.map(({ core, enrichment }) => ({ core, enrichment })) },
-      evidence: evidenceItems.map(compactEvidenceItem), instruction: '输出 ValidationReport，最多一个定向 rewriteTask。'
+      evidence: evidenceItems.map(compactEvidenceItem),
+      instruction: '输出 ValidationReport，最多一个定向 rewriteTask。重点拒绝只回答“是什么”的浅层笔记，并检查事实、可推断与拓展思考的边界。'
     }), 'import-markdown', { json: true });
     if (validationResult.usageRecord) usageRecords.push(validationResult.usageRecord);
-    validation = normalizeValidationReport(validationResult.json);
+    validation = mergeValidationReports(
+      normalizeValidationReport(validationResult.json),
+      localValidationReport(plan, written)
+    );
   } catch (error) {
     console.warn('Deep validator failed; using local validation', error);
   }
@@ -2228,7 +2342,8 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
       const result = await runAgentStep(settings, job.id, 'topic.note-writer', buildAgentUserPrompt({
         projectBrief, sourceManifest, globalConstraints,
         task: { ...target.noteTask, rewriteInstruction: rewrite.instruction },
-        evidence: target.evidencePack.map(compactEvidenceItem), instruction: '这是唯一一次定向重写，仅修复 Validator 指出的问题。'
+        evidence: target.evidencePack.map(compactEvidenceItem),
+        instruction: '这是唯一一次定向重写。补足 Validator 指出的深度缺口，形成事实—机制—原因—取舍—边界的解释链；合理推断与拓展思考要明确标注。'
       }), 'import-markdown', { json: true });
       if (result.usageRecord) usageRecords.push(result.usageRecord);
       target.core = normalizeCoreNoteDraft(result.json, target.noteTask, target.topic, plan.subject, target.evidencePack);

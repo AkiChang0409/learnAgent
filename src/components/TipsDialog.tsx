@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
-import { Check, Clipboard, Lightbulb, ShieldCheck, X } from 'lucide-react';
+import { Check, Clipboard, Download, Lightbulb, MessageSquareText, ShieldCheck, X } from 'lucide-react';
 import { useModalFocus } from '../hooks/useModalFocus';
-import codebaseTechnicalAnalysisSkill from '../content/codebase-technical-analysis-writer.md?raw';
+import { PROJECT_ANALYSIS_TIP } from '../content/tips';
 
 async function copyText(value: string) {
   if (navigator.clipboard?.writeText) {
@@ -19,6 +19,17 @@ async function copyText(value: string) {
   if (!copied) throw new Error('无法访问剪贴板');
 }
 
+function downloadText(fileName: string, value: string) {
+  const url = URL.createObjectURL(new Blob([value], { type: 'text/markdown;charset=utf-8' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 export function TipsDialog({ open, onClose, onCopied }: {
   open: boolean;
   onClose: () => void;
@@ -27,6 +38,7 @@ export function TipsDialog({ open, onClose, onCopied }: {
   const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
+  const [promptCopyState, setPromptCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
   const close = useCallback(() => onClose(), [onClose]);
   useModalFocus(open, dialogRef, close, closeRef);
 
@@ -34,12 +46,22 @@ export function TipsDialog({ open, onClose, onCopied }: {
 
   async function handleCopy() {
     try {
-      await copyText(codebaseTechnicalAnalysisSkill);
+      await copyText(PROJECT_ANALYSIS_TIP.content);
       setCopyState('copied');
       onCopied();
       window.setTimeout(() => setCopyState('idle'), 2200);
     } catch {
       setCopyState('error');
+    }
+  }
+
+  async function handlePromptCopy() {
+    try {
+      await copyText(PROJECT_ANALYSIS_TIP.codexPrompt);
+      setPromptCopyState('copied');
+      window.setTimeout(() => setPromptCopyState('idle'), 2200);
+    } catch {
+      setPromptCopyState('error');
     }
   }
 
@@ -70,18 +92,16 @@ export function TipsDialog({ open, onClose, onCopied }: {
           <article className="tip-card">
             <div className="tip-card-top">
               <span className="tip-badge"><ShieldCheck size={13} /> 官方推荐</span>
-              <span className="tip-index">TIP 01</span>
+              <span className="tip-index">TIP {String(PROJECT_ANALYSIS_TIP.index).padStart(2, '0')}</span>
             </div>
-            <h3>先用 Codex 生成项目技术分析 Markdown</h3>
-            <p className="tip-summary">
-              直接导入普通 README 往往缺少架构、数据流和代码证据。把这份 Skill 放进你的 Codex 项目，
-              让 Codex 先读代码并生成高质量分析文档，再导入 LearnAgent，项目笔记会更完整、可靠。
-            </p>
+            <h3>{PROJECT_ANALYSIS_TIP.title}</h3>
+            <p className="tip-summary">{PROJECT_ANALYSIS_TIP.summary}</p>
+            <p className="tip-version">Skill v{PROJECT_ANALYSIS_TIP.version} · 更新于 {PROJECT_ANALYSIS_TIP.updatedAt}</p>
 
             <ol className="tip-steps">
-              <li><strong>1</strong><span>复制下方完整 Skill 内容</span></li>
-              <li><strong>2</strong><span>保存为 <code>.agents/skills/codebase-technical-analysis-writer/SKILL.md</code></span></li>
-              <li><strong>3</strong><span>将生成的 Markdown 导入 LearnAgent</span></li>
+              {PROJECT_ANALYSIS_TIP.steps.map((step, index) => (
+                <li key={step}><strong>{index + 1}</strong><span>{step}</span></li>
+              ))}
             </ol>
 
             <div className="tip-actions">
@@ -89,11 +109,19 @@ export function TipsDialog({ open, onClose, onCopied }: {
                 {copyState === 'copied' ? <Check size={16} /> : <Clipboard size={16} />}
                 {copyState === 'copied' ? '已复制' : copyState === 'error' ? '复制失败，请展开预览手动复制' : '复制 Skill 内容'}
               </button>
+              <button className="secondary-action" type="button" onClick={() => downloadText(PROJECT_ANALYSIS_TIP.fileName, PROJECT_ANALYSIS_TIP.content)}>
+                <Download size={16} />
+                下载 SKILL.md
+              </button>
+              <button className="secondary-action" type="button" onClick={() => void handlePromptCopy()}>
+                {promptCopyState === 'copied' ? <Check size={16} /> : <MessageSquareText size={16} />}
+                {promptCopyState === 'copied' ? '指令已复制' : promptCopyState === 'error' ? '指令复制失败' : '复制 Codex 指令'}
+              </button>
             </div>
 
             <details className="tip-preview">
               <summary>预览 Skill 内容</summary>
-              <pre>{codebaseTechnicalAnalysisSkill}</pre>
+              <pre>{PROJECT_ANALYSIS_TIP.content}</pre>
             </details>
           </article>
         </div>

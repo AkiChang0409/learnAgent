@@ -1455,7 +1455,15 @@ export default function App() {
         onClose={() => setShowGenerate(false)}
       />
 
-      <ImportModeDialog selection={sourceSelection} onStart={startImport} onClose={cancelImport} />
+      <ImportModeDialog
+        selection={sourceSelection}
+        onStart={startImport}
+        onClose={cancelImport}
+        onOpenTips={() => {
+          void cancelImport();
+          setShowTips(true);
+        }}
+      />
 
       <TipsDialog
         open={showTips}
