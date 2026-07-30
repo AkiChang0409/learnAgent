@@ -21,4 +21,10 @@ describe('Markdown import depth contracts', () => {
     expect(registry['note.enricher'].system).toContain('迁移条件');
     expect(registry['knowledge.validator'].system).toContain('因果链');
   });
+
+  it('gives single-note generation its own focus and anti-copy review stages', () => {
+    expect(registry['note.focus-planner'].system).toContain('scopeOut');
+    expect(registry['note.generator'].system).toContain('只围绕 focusQuestion');
+    expect(registry['note.quality-critic'].system).toContain('大段照抄');
+  });
 });

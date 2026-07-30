@@ -13,6 +13,12 @@ const { AGENT_REGISTRY } = require('./agent-registry.cjs');
 const { loadSafeSnapshot } = require('./key-migration.cjs');
 const { createUpdateManager } = require('./updater.cjs');
 const {
+  conciseNoteFocus,
+  containsLongVerbatimCopy,
+  localSingleNoteQualityReport,
+  singleNoteInputMode
+} = require('./single-note-quality.cjs');
+const {
   buildAgentRetryPrompt,
   isAgentOutputError,
   markAgentOutputParseError,
@@ -221,49 +227,341 @@ function sendNoteGenerationProgress(sender, task, patch) {
   sender.send('ai:note-generation-progress', { ...task });
 }
 
+function localSingleNoteEvidence(input) {
+  const source = String(input || '');
+  const items = source
+    .split(/\r?\n|(?<=[。！？；])\s*/)
+    .map((item) => item.replace(/^\s*(?:#{1,6}|[-*+]|\d+[.)、])\s*/, '').trim())
+    .filter((item) => item.length >= 12)
+    .slice(0, 8);
+  const selected = items.length ? items : [source.trim()].filter(Boolean);
+  return selected.map((evidenceText, index) => ({
+    id: `note_ev_${index + 1}`,
+    title: clipText(evidenceText, 42),
+    detail: clipText(evidenceText, 260),
+    evidenceText: clipText(evidenceText, 220)
+  }));
+}
+
+function localSingleNoteFocusPlan(input, targetSubject) {
+  const title = conciseNoteFocus(input);
+  const inputMode = singleNoteInputMode(input);
+  return {
+    title,
+    inputMode,
+    focusQuestion: inputMode === 'source-material'
+      ? `这份材料围绕“${title}”最值得深入理解的核心能力、机制和边界是什么？`
+      : `“${title}”解决什么核心问题，它如何运作并在什么条件下适用？`,
+    learningGoal: `在一篇笔记内建立对“${title}”的机制理解、边界判断和迁移能力。`,
+    targetSubject: targetSubject || inferSubject(input),
+    scopeIn: ['核心问题与必要概念', '原理或运行机制', '适用条件与边界', '一个可推演案例'],
+    scopeOut: ['与核心问题无关的背景清单', '原始材料逐段复述', '未经材料支持的具体事实或指标'],
+    keyPoints: ['问题与目标', '机制与因果链', '边界与取舍', '迁移应用'],
+    reasoningQuestions: ['为什么需要这个机制？', '关键条件变化时结果会怎样？', '什么情况下不应使用或不能得出该结论？'],
+    extensionDirections: ['相邻概念对比', '迁移到新场景时需要重新检查的条件'],
+    evidenceItems: localSingleNoteEvidence(input)
+  };
+}
+
+function normalizeSingleNoteFocusPlan(value, input, targetSubject) {
+  const fallback = localSingleNoteFocusPlan(input, targetSubject);
+  const source = value && typeof value === 'object' ? value : {};
+  const inputMode = source.inputMode === 'source-material' || source.inputMode === 'topic-request'
+    ? source.inputMode
+    : fallback.inputMode;
+  const inputText = String(input || '');
+  const evidenceItems = (Array.isArray(source.evidenceItems) ? source.evidenceItems : [])
+    .slice(0, 10)
+    .map((item, index) => {
+      const evidenceText = String(item?.evidenceText || '').trim();
+      if (inputMode === 'source-material' && (!evidenceText || !inputText.includes(evidenceText))) return null;
+      const detail = String(item?.detail || evidenceText || '').trim();
+      if (!detail) return null;
+      return {
+        id: String(item?.id || `note_ev_${index + 1}`).replace(/[^\w.-]+/g, '_'),
+        title: clipText(item?.title || detail, 60),
+        detail: clipText(detail, 320),
+        evidenceText: clipText(evidenceText || detail, 220)
+      };
+    })
+    .filter(Boolean);
+  const list = (key, fallbackValue, limit = 8) => {
+    const values = asStringList(source[key]);
+    return (values.length ? values : fallbackValue).slice(0, limit);
+  };
+  return {
+    title: clipText(source.title || fallback.title, 60),
+    inputMode,
+    focusQuestion: clipText(source.focusQuestion || fallback.focusQuestion, 240),
+    learningGoal: clipText(source.learningGoal || fallback.learningGoal, 260),
+    targetSubject: targetSubject || String(source.targetSubject || fallback.targetSubject).trim(),
+    scopeIn: list('scopeIn', fallback.scopeIn),
+    scopeOut: list('scopeOut', fallback.scopeOut),
+    keyPoints: list('keyPoints', fallback.keyPoints),
+    reasoningQuestions: list('reasoningQuestions', fallback.reasoningQuestions),
+    extensionDirections: list('extensionDirections', fallback.extensionDirections),
+    evidenceItems: evidenceItems.length ? evidenceItems : fallback.evidenceItems
+  };
+}
+
+function normalizeSingleNoteQualityReport(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const issues = asStringList(source.issues).slice(0, 12);
+  const score = Math.max(0, Math.min(100, Number(source.score ?? (issues.length ? 65 : 90)) || 0));
+  return {
+    ok: Boolean(source.ok ?? (score >= 82 && !issues.length)),
+    score,
+    issues,
+    rewriteInstruction: String(source.rewriteInstruction || '').trim()
+  };
+}
+
+function mergeSingleNoteQualityReports(modelReport, localReport) {
+  const issues = Array.from(new Set([...(modelReport.issues || []), ...(localReport.issues || [])]));
+  return {
+    ok: Boolean(modelReport.ok && localReport.ok),
+    score: Math.min(modelReport.score, localReport.score),
+    issues,
+    rewriteInstruction: [modelReport.rewriteInstruction, localReport.rewriteInstruction].filter(Boolean).join('\n')
+  };
+}
+
+function sanitizeFocusedNoteDraft(input, focusPlan, draft, fallback) {
+  let changed = false;
+  const chooseText = (value, fallbackValue, max) => {
+    const text = String(value || '').trim();
+    if (!text || text.length > max || containsLongVerbatimCopy(input, text)) {
+      changed = true;
+      return String(fallbackValue || '').trim();
+    }
+    return text;
+  };
+  const title = chooseText(draft?.title, focusPlan.title || fallback.title, 60);
+  const summary = chooseText(draft?.summary, fallback.summary, 420);
+  const summaryBlocksText = richBlocksText(draft?.summaryBlocks || []);
+  const summaryBlocksSafe = !summaryBlocksText || !containsLongVerbatimCopy(input, summaryBlocksText);
+  if (!summaryBlocksSafe) changed = true;
+  const seenHeadings = new Set();
+  const sections = [];
+  for (const section of draft?.sections || []) {
+    const heading = String(section?.heading || '').trim();
+    const content = String(section?.content || '').trim();
+    const blocksText = richBlocksText(section?.blocks || []);
+    const headingKey = heading.toLowerCase().replace(/\s+/g, '');
+    if (!heading || !content || seenHeadings.has(headingKey) ||
+      containsLongVerbatimCopy(input, content) || (blocksText && containsLongVerbatimCopy(input, blocksText))) {
+      changed = true;
+      continue;
+    }
+    seenHeadings.add(headingKey);
+    sections.push(section);
+    if (sections.length === 6) break;
+  }
+  for (const fallbackSection of fallback.sections || []) {
+    if (sections.length >= 4) break;
+    const headingKey = String(fallbackSection.heading || '').toLowerCase().replace(/\s+/g, '');
+    if (seenHeadings.has(headingKey)) continue;
+    changed = true;
+    seenHeadings.add(headingKey);
+    sections.push(fallbackSection);
+  }
+  const safeList = (value, fallbackValue, limit) => {
+    const filtered = asStringList(value)
+      .filter((item) => !containsLongVerbatimCopy(input, item))
+      .slice(0, limit);
+    if (filtered.length !== asStringList(value).slice(0, limit).length) changed = true;
+    return filtered.length ? filtered : fallbackValue;
+  };
+  return {
+    changed,
+    draft: {
+      ...draft,
+      title,
+      topic: chooseText(draft?.topic, focusPlan.title || fallback.topic, 80),
+      summary,
+      summaryBlocks: summary === draft?.summary && summaryBlocksSafe ? draft.summaryBlocks : fallback.summaryBlocks,
+      sections: sections.length ? sections : fallback.sections,
+      cases: safeList(draft?.cases, fallback.cases, 5),
+      pitfalls: safeList(draft?.pitfalls, fallback.pitfalls, 6),
+      interviewQuestions: safeList(draft?.interviewQuestions, fallback.interviewQuestions, 8)
+    }
+  };
+}
+
 async function runNoteGenerationTask(sender, task, settings) {
   let pulse = null;
+  const usageRecords = [];
   try {
     sendNoteGenerationProgress(sender, task, {
       stage: 'preparing',
-      message: '正在准备生成内容',
+      message: '正在提炼核心问题与笔记范围',
       percent: 12
     });
-    let percent = 24;
-    sendNoteGenerationProgress(sender, task, {
-      stage: 'generating',
-      message: 'AI 正在生成笔记',
-      percent
-    });
-    pulse = setInterval(() => {
-      percent = Math.min(82, percent + Math.max(1, Math.round((82 - percent) * 0.16)));
-      sendNoteGenerationProgress(sender, task, { percent });
-    }, 900);
-
     let result;
     try {
-      const agentResult = await runAgent(settings, 'note.generator', task.input, 'generate-note', { json: true });
       const fallback = localGeneratedNote(task.input);
+      const inputMode = singleNoteInputMode(task.input);
+      const projectBrief = {
+        projectName: conciseNoteFocus(task.input),
+        projectType: '单篇聚焦笔记',
+        targetAudience: '深入学习与迁移应用',
+        targetSubject: task.targetSubject || inferSubject(task.input),
+        inputMode,
+        qualityGoal: '只围绕一个核心问题生成一篇高质量笔记，禁止复制原始材料或堆砌无关知识点。'
+      };
+      const sourceManifest = [{
+        sourceId: 'note_input',
+        fileName: '用户输入',
+        fileType: inputMode,
+        chunkCount: 1
+      }];
+      const constraints = [
+        '只生成一篇笔记，不拆成知识地图或多篇笔记。',
+        '先收敛范围，再写正文；宁可少讲，也不要复制所有输入。',
+        '材料事实、可推断结论和拓展理解必须明确区分。',
+        '不得大段复制用户输入；引用只保留支撑核心问题所需的短证据。',
+        '输出中文 JSON，不要输出 Markdown 包裹。'
+      ];
+      const job = createAgentJob(projectBrief, sourceManifest, 'focused-note', 4);
+      const planResult = await runAgentStep(
+        settings,
+        job.id,
+        'note.focus-planner',
+        buildAgentUserPrompt({
+          projectBrief,
+          sourceManifest,
+          globalConstraints: constraints,
+          task: { input: task.input, targetSubject: task.targetSubject, inputMode },
+          evidence: undefined,
+          instruction: '生成一份 FocusPlan。只确定一个核心问题，并明确 scopeIn 与 scopeOut；不要写最终笔记。'
+        }),
+        'generate-note',
+        { json: true }
+      );
+      if (planResult.usageRecord) usageRecords.push(planResult.usageRecord);
+      const focusPlan = normalizeSingleNoteFocusPlan(planResult.json, task.input, task.targetSubject);
+
+      sendNoteGenerationProgress(sender, task, {
+        stage: 'generating',
+        message: `正在围绕“${clipText(focusPlan.focusQuestion, 34)}”深度写作`,
+        percent: 38
+      });
+      let percent = 44;
+      pulse = setInterval(() => {
+        percent = Math.min(72, percent + Math.max(1, Math.round((72 - percent) * 0.16)));
+        sendNoteGenerationProgress(sender, task, { percent });
+      }, 900);
+      const writerResult = await runAgentStep(
+        settings,
+        job.id,
+        'note.generator',
+        buildAgentUserPrompt({
+          projectBrief,
+          sourceManifest,
+          globalConstraints: constraints,
+          task: { focusPlan },
+          evidence: focusPlan.evidenceItems,
+          instruction: '根据 FocusPlan 写一篇完整笔记。严格排除 scopeOut，生成 4 到 6 个职责不同的小节，不要复述或重排原始材料。'
+        }),
+        'generate-note',
+        { json: true }
+      );
+      if (writerResult.usageRecord) usageRecords.push(writerResult.usageRecord);
+      let draft = normalizeGeneratedNote(writerResult.json, fallback);
+
+      if (pulse) clearInterval(pulse);
+      pulse = null;
+      sendNoteGenerationProgress(sender, task, {
+        stage: 'formatting',
+        message: '正在检查聚焦度、重复内容与解释深度',
+        percent: 78
+      });
+      const localQuality = localSingleNoteQualityReport(task.input, focusPlan, draft);
+      let quality = localQuality;
+      try {
+        const criticResult = await runAgentStep(
+          settings,
+          job.id,
+          'note.quality-critic',
+          buildAgentUserPrompt({
+            projectBrief,
+            sourceManifest,
+            globalConstraints: constraints,
+            task: { focusPlan, draft: plainNoteForModel(draft) },
+            evidence: focusPlan.evidenceItems,
+            instruction: '严格评审这篇单篇笔记。若范围混乱、复制材料、结构重复或解释浅显，必须判为不合格并给出整体重写指令。'
+          }),
+          'generate-note',
+          { json: true }
+        );
+        if (criticResult.usageRecord) usageRecords.push(criticResult.usageRecord);
+        quality = mergeSingleNoteQualityReports(normalizeSingleNoteQualityReport(criticResult.json), localQuality);
+      } catch (error) {
+        console.warn('Single-note critic failed; using local quality gate:', error);
+      }
+
+      let rewritten = false;
+      if (!quality.ok) {
+        sendNoteGenerationProgress(sender, task, {
+          stage: 'formatting',
+          message: '发现内容失焦或浅显，正在整体重写',
+          percent: 88
+        });
+        const rewriteResult = await runAgentStep(
+          settings,
+          job.id,
+          'note.generator',
+          buildAgentUserPrompt({
+            projectBrief,
+            sourceManifest,
+            globalConstraints: constraints,
+            task: { focusPlan, previousDraft: plainNoteForModel(draft), qualityReport: quality },
+            evidence: focusPlan.evidenceItems,
+            instruction: [
+              '这是一次整体重写，不是追加小节。',
+              quality.rewriteInstruction || quality.issues.join('；'),
+              '删除原文复述、scopeOut 和重复内容，围绕 focusQuestion 重建 4 到 6 个小节的解释链。'
+            ].join('\n')
+          }),
+          'generate-note',
+          { json: true }
+        );
+        if (rewriteResult.usageRecord) usageRecords.push(rewriteResult.usageRecord);
+        draft = normalizeGeneratedNote(rewriteResult.json, fallback);
+        rewritten = true;
+      }
+      const sanitized = sanitizeFocusedNoteDraft(task.input, focusPlan, draft, fallback);
+      draft = sanitized.draft;
+      updateAgentJobStatus(job.id, 'completed');
       result = {
-        draft: normalizeGeneratedNote(agentResult.json, fallback),
+        draft,
         usedFallback: false,
-        message: '已使用配置模型生成笔记',
-        usageRecord: agentResult.usageRecord
+        message: rewritten
+          ? '笔记已通过聚焦规划、质量评审与重写'
+          : sanitized.changed
+            ? '笔记已通过聚焦规划与质量评审，并清理了重复原文'
+            : '笔记已通过聚焦规划与质量评审',
+        usageRecord: aggregateUsageRecords(usageRecords, settings, 'generate-note')
       };
     } catch (error) {
       const message = error?.message === 'LOCAL_PROVIDER'
         ? '已使用本地兜底生成笔记'
         : `模型调用失败，已使用本地兜底：${error?.message || '未知错误'}`;
       if (error?.message !== 'LOCAL_PROVIDER') console.warn('Falling back to local note generation:', error);
-      result = { draft: localGeneratedNote(task.input), usedFallback: true, message };
+      result = {
+        draft: localGeneratedNote(task.input),
+        usedFallback: true,
+        message,
+        usageRecord: aggregateUsageRecords(usageRecords, settings, 'generate-note')
+      };
     }
 
     if (pulse) clearInterval(pulse);
     pulse = null;
     sendNoteGenerationProgress(sender, task, {
       stage: 'formatting',
-      message: '正在整理笔记结构',
-      percent: 92
+      message: '正在整理最终笔记结构',
+      percent: 96
     });
     await new Promise((resolve) => setTimeout(resolve, 120));
     sendNoteGenerationProgress(sender, task, {
@@ -504,76 +802,85 @@ function parseFirstJsonObject(source) {
 function localGeneratedNote(input) {
   const cleanInput = String(input || '').trim();
   const subject = inferSubject(cleanInput);
-  const topic = cleanInput
-    .replace(/今天|学习|学了|主题|关于|请|总结|知识点/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim() || cleanInput || '未命名主题';
+  const topic = conciseNoteFocus(cleanInput);
+  const inputMode = singleNoteInputMode(cleanInput);
+  const evidence = localSingleNoteEvidence(cleanInput).slice(0, 4);
+  const sourceSignals = evidence.length
+    ? evidence.map((item) => `- ${item.title}`).join('\n')
+    : '- 当前输入只提供了主题，尚无可提炼的材料事实。';
 
   return {
-    title: `${topic}学习总结`,
+    title: topic,
     subject,
     topic,
     tags: Array.from(new Set([subject, ...topic.split(/[，,、\s]+/).filter(Boolean).slice(0, 4)])),
-    summary: `${topic}的学习可以按“概念定义、核心机制、典型场景、常见误区、可迁移问题”来整理。当前处于本地兜底模式，建议在设置中接入 Ollama 或 OpenAI-compatible 接口获得更细的学科推理与案例。`,
+    summary: `本篇只聚焦“${topic}”的核心问题、机制、适用边界和迁移思考。当前使用本地兜底，因此只做范围收敛和结构整理，不把原始输入整段复制为正文。`,
     summaryBlocks: [{
       type: 'paragraph',
       runs: [
-        { text: `${topic}的学习可以按`, bold: false },
-        { text: '概念定义、核心机制、典型场景、常见误区、可迁移问题', bold: true, tone: 'accent' },
-        { text: '来整理。当前处于本地兜底模式。' }
+        { text: '核心范围：', bold: true, tone: 'accent' },
+        { text: `${topic}的问题、机制、边界与迁移。` },
+        { text: '当前为本地兜底模式，不扩写未经验证的细节。' }
       ]
     }],
     sections: [
       {
-        heading: '核心知识点',
-        content: [
-          `先明确${topic}解决的问题、输入输出、约束条件和适用边界。`,
-          '把概念拆成定义、组成部分、运行流程、关键公式或规则，并记录每一步的因果关系。',
-          '用自己的话复述一次，再用一个反例检查是否真的理解边界。'
-        ].map((item) => `- ${item}`).join('\n'),
+        heading: '核心问题与范围',
+        content: inputMode === 'source-material'
+          ? `这篇笔记只回答“${topic}最值得理解的核心能力、机制和边界是什么”，不会逐段收录原始材料。\n\n材料中可继续核对的短线索：\n${sourceSignals}`
+          : `这篇笔记只回答：“${topic}解决什么问题、如何运作、在什么条件下适用？”与该问题无关的背景知识暂不展开。`,
         blocks: [{
           type: 'bulletList',
           items: [
-            [{ text: `先明确${topic}解决的问题、输入输出、约束条件和适用边界。`, bold: true }],
-            [{ text: '把概念拆成定义、组成部分、运行流程、关键公式或规则，并记录每一步的因果关系。' }],
-            [{ text: '用自己的话复述一次，再用一个反例检查是否真的理解边界。', highlight: 'yellow' }]
+            [{ text: `核心问题：${topic}解决什么问题？`, bold: true }],
+            [{ text: '范围限制：只保留解释核心问题所需的信息。' }],
+            [{ text: '证据边界：本地模式不补充材料中没有的具体事实。', highlight: 'yellow' }]
           ]
         }]
       },
       {
-        heading: '学习路径',
+        heading: '理解机制的路径',
         content: [
-          '1. 先写出一句话定义。',
-          '2. 画出流程或结构关系。',
-          '3. 找一个小案例手动推演。',
-          '4. 总结最容易混淆的两个点。',
-          '5. 用面试问答检验表达。'
+          '1. 明确输入、目标和约束。',
+          '2. 找出关键组成部分及其关系。',
+          '3. 按发生顺序解释过程和因果。',
+          '4. 改变一个条件，观察结果如何变化。'
         ].join('\n'),
         blocks: [{
           type: 'orderedList',
           items: [
-            [{ text: '先写出一句话定义。' }],
-            [{ text: '画出流程或结构关系。' }],
-            [{ text: '找一个小案例手动推演。' }],
-            [{ text: '总结最容易混淆的两个点。', highlight: 'yellow' }],
-            [{ text: '用面试问答检验表达。' }]
+            [{ text: '明确输入、目标和约束。' }],
+            [{ text: '找出关键组成部分及其关系。' }],
+            [{ text: '按发生顺序解释过程和因果。' }],
+            [{ text: '改变一个条件，观察结果如何变化。', highlight: 'yellow' }]
           ]
         }]
+      },
+      {
+        heading: '适用边界与误区',
+        content: [
+          `判断“${topic}”是否适用时，应先检查前提、输入质量和目标是否一致。`,
+          '不能因为材料列出了某项能力或关键词，就推断其已经落地或取得效果。',
+          '如果无法解释条件变化后的结果，说明当前理解仍停留在名词层面。'
+        ].map((item) => `- ${item}`).join('\n')
+      },
+      {
+        heading: '拓展理解',
+        content: `可把“${topic}”迁移到一个更小的真实场景：先定义成功标准，再画出处理过程，最后加入一个失败条件。对比条件变化前后的结果，比继续增加关键词更能检验理解。`
       }
     ],
     cases: [
-      `案例：把${topic}应用到一个最小问题中，记录初始条件、执行过程和结果解释。`,
-      `迁移：尝试换一个约束条件，观察${topic}的结论是否还成立。`
+      `最小推演：为“${topic}”设定一个明确目标和约束，写出处理步骤、预期结果，再改变一个条件观察失败分支。`
     ],
     pitfalls: [
-      '只背定义但没有说明适用前提。',
-      '把相似概念混用，忽略输入、输出或目标函数的差异。',
-      '会做题但无法解释为什么这样做。'
+      '把原始材料重新排版成正文，却没有解释信息之间的关系。',
+      '为了显得完整而混入多个主题，导致单篇笔记没有核心问题。',
+      '把通用拓展误写成材料已经证明的事实。'
     ],
     interviewQuestions: [
-      `请用一分钟解释${topic}是什么，以及它主要解决什么问题？`,
-      `如果${topic}的前提条件不满足，会发生什么？`,
-      `请举一个${topic}的真实应用案例，并说明关键决策点。`
+      `请用自己的话说明“${topic}”的核心问题和机制，不要复述输入。`,
+      `改变一个关键前提后，结论或流程会如何变化？`,
+      `哪些内容是材料事实，哪些只是可推断或拓展理解？`
     ]
   };
 }

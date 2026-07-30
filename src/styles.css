@@ -2559,6 +2559,42 @@ label select,
   gap: 8px 14px;
 }
 
+.generate-scope-guide {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-soft-border);
+  border-radius: var(--r-md);
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+  font-size: 12px;
+}
+
+.generate-scope-guide strong {
+  margin-right: 2px;
+}
+
+.generate-scope-guide span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 68%, transparent);
+}
+
+.generate-input-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: -6px;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+}
+
+.generate-input-meta span:last-child {
+  flex: 0 0 auto;
+}
+
 .rich-editor {
   margin: 2px 0 14px;
   border: 1px solid transparent;

@@ -1,5 +1,7 @@
 const STRING_ARRAY_FIELDS: Record<string, string[]> = {
-  'note.enricher': ['cases', 'pitfalls', 'interviewQuestions', 'suggestedTags', 'usedEvidenceIds']
+  'note.enricher': ['cases', 'pitfalls', 'interviewQuestions', 'suggestedTags', 'usedEvidenceIds'],
+  'note.focus-planner': ['scopeIn', 'scopeOut', 'keyPoints', 'reasoningQuestions', 'extensionDirections'],
+  'note.quality-critic': ['issues']
 };
 
 function textFromAgentValue(value) {
@@ -66,6 +68,20 @@ function validateAgentOutput(agentId, value) {
     }
   };
   if (agentId === 'note.generator') requireArray('sections');
+  if (agentId === 'note.focus-planner') {
+    requireArray('scopeIn');
+    requireArray('scopeOut');
+    requireArray('keyPoints');
+    requireArray('reasoningQuestions');
+    requireArray('extensionDirections');
+    requireArray('evidenceItems');
+  }
+  if (agentId === 'note.quality-critic') {
+    if (typeof value.ok !== 'boolean') {
+      throw agentOutputError(`${agentId} 输出字段 ok 必须是布尔值`, { agentId, field: 'ok' });
+    }
+    requireArray('issues');
+  }
   if (agentId === 'note.emphasis') {
     if (!value.summary || typeof value.summary !== 'object' || Array.isArray(value.summary)) {
       throw agentOutputError(`${agentId} 输出字段 summary 必须是对象`, { agentId, field: 'summary' });

@@ -82,4 +82,25 @@ describe('agent output boundary', () => {
     })).not.toThrow();
     expect(() => validateAgentOutput('note.emphasis', { summary: {}, sections: 'bad' })).toThrow('sections');
   });
+
+  it('validates the focused note planner and critic contracts', () => {
+    const plan = normalizeAgentOutput('note.focus-planner', {
+      title: '聚焦主题',
+      scopeIn: '核心机制',
+      scopeOut: [],
+      keyPoints: ['因果链'],
+      reasoningQuestions: ['为什么？'],
+      extensionDirections: ['迁移条件'],
+      evidenceItems: []
+    });
+    expect(plan.scopeIn).toEqual(['核心机制']);
+    expect(() => validateAgentOutput('note.focus-planner', plan)).not.toThrow();
+    expect(() => validateAgentOutput('note.quality-critic', {
+      ok: false,
+      score: 55,
+      issues: ['复制原文'],
+      rewriteInstruction: '整体重写'
+    })).not.toThrow();
+    expect(() => validateAgentOutput('note.quality-critic', { ok: 'yes', issues: [] })).toThrow('ok');
+  });
 });

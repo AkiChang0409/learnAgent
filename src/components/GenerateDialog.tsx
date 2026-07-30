@@ -49,7 +49,7 @@ export function GenerateDialog({
             </span>
             <div>
               <strong>AI 生成笔记</strong>
-              <span>将整理进「{targetSubject}」，提交后会在后台运行</span>
+              <span>将整理进「{targetSubject}」，先收敛范围，再生成一篇聚焦笔记</span>
             </div>
           </div>
           <button className="icon-button ghost" onClick={onClose} aria-label="关闭" title="关闭">
@@ -57,10 +57,18 @@ export function GenerateDialog({
           </button>
         </div>
 
+        <div className="generate-scope-guide" aria-label="生成标准">
+          <strong>单篇生成标准</strong>
+          <span>只解决一个核心问题</span>
+          <span>不整段复制材料</span>
+          <span>解释机制、边界与迁移</span>
+        </div>
+
         <textarea
           ref={inputRef}
           className="generate-input"
           value={value}
+          maxLength={20_000}
           autoFocus
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
@@ -69,8 +77,13 @@ export function GenerateDialog({
               onGenerate();
             }
           }}
-          placeholder="描述今天学的内容，例如：操作系统里的虚拟内存和页面置换算法，重点讲 LRU 和时钟算法…"
+          placeholder="写下一个主题或核心问题，也可以粘贴材料并说明最想理解的部分。例如：结合这份岗位 JD，只分析 MLOps 工程师最核心的能力链路，不要复述全部职责…"
         />
+
+        <div className="generate-input-meta">
+          <span>AI 会先排除无关内容；材料越长，越建议明确“只讲什么”。</span>
+          <span>{value.length.toLocaleString()} / 20,000</span>
+        </div>
 
         <div className="generate-actions">
           <button
@@ -86,7 +99,7 @@ export function GenerateDialog({
           <span className="generate-hint">Ctrl/⌘ + Enter 生成</span>
           <button className="primary-action" onClick={onGenerate} disabled={!value.trim() || isGenerating}>
             {isGenerating ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-            后台生成
+            生成聚焦笔记
           </button>
         </div>
       </section>

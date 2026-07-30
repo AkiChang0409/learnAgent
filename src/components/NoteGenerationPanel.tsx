@@ -14,7 +14,7 @@ export function NoteGenerationPanel({
   return (
     <section className="note-generation-panel" aria-live="polite">
       <div className="note-generation-heading">
-        <span><Sparkles size={16} />后台生成{running ? ` · ${running} 项进行中` : ''}</span>
+        <span><Sparkles size={16} />聚焦笔记生成{running ? ` · ${running} 项进行中` : ''}</span>
       </div>
       <div className="note-generation-list">
         {tasks.map((task) => {
