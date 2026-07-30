@@ -1,7 +1,8 @@
 import { lazy, Suspense } from 'react';
 import { ArrowDown, ArrowUp, ChevronRight, Loader2, Plus, ScanText, Sparkles, Trash2, X } from 'lucide-react';
-import type { Note, NoteSection } from '../types';
+import type { AgentPersonaId, AgentPersonaSummary, AiProvider, Note, NoteSection } from '../types';
 import { AutoTextarea } from './AutoTextarea';
+import { PersonaSelector } from './PersonaSelector';
 
 const RichTextEditor = lazy(() => import('./RichTextEditor').then((module) => ({ default: module.RichTextEditor })));
 
@@ -34,7 +35,11 @@ export function NoteView({
   onNavigateSubject,
   onAnalyzeEmphasis,
   isAnalyzingEmphasis,
-  subjectNoteCount
+  subjectNoteCount,
+  personas = [],
+  provider = 'local',
+  onPersonaChange,
+  onUpdateCollection
 }: {
   note: Note;
   subjectOptions: string[];
@@ -52,7 +57,16 @@ export function NoteView({
   onAnalyzeEmphasis: () => void;
   isAnalyzingEmphasis: boolean;
   subjectNoteCount: number;
+  personas?: AgentPersonaSummary[];
+  provider?: AiProvider;
+  onPersonaChange?: (personaId: AgentPersonaId) => void;
+  onUpdateCollection?: (collectionId: string, values: string[], kind?: ListChangeKind) => void;
 }) {
+  const dynamicCollections = note.collections?.length
+    ? note.collections
+    : (note.personaId || 'learning-notes') === 'learning-notes'
+      ? INSIGHT_FIELDS.map(({ field, title }) => ({ id: field, title, items: note[field] }))
+      : [];
   return (
     <article className="note-view">
       <header className="note-topbar">
@@ -64,6 +78,15 @@ export function NoteView({
           <span className="crumb-current">{note.topic?.trim() || '未命名主题'}</span>
         </nav>
         <div className="note-topbar-actions">
+          {personas.length > 0 && onPersonaChange && (
+            <PersonaSelector
+              personas={personas}
+              value={note.personaId || 'learning-notes'}
+              provider={provider}
+              onChange={onPersonaChange}
+              compact
+            />
+          )}
           <button
             type="button"
             className="assistant-toggle emphasis-analyze-button"
@@ -138,7 +161,7 @@ export function NoteView({
         </div>
 
         <section className="doc-summary">
-          <span className="doc-label">知识总结</span>
+          <span className="doc-label">{note.summaryLabel || '知识总结'}</span>
           <Suspense fallback={<RichEditorFallback text={note.summary} />}>
             <RichTextEditor
               value={note.summaryRich}
@@ -146,7 +169,7 @@ export function NoteView({
               allowTables={false}
               onChange={(summaryRich, summary) => onChange({ summary, summaryRich })}
               placeholder="一句话概括这页笔记的核心…"
-              ariaLabel="知识总结"
+              ariaLabel={note.summaryLabel || '知识总结'}
             />
           </Suspense>
         </section>
@@ -210,15 +233,21 @@ export function NoteView({
         </button>
 
         <div className="doc-insights">
-          {INSIGHT_FIELDS.map(({ field, title, placeholder }) => (
-            <InlineList
-              key={field}
-              title={title}
-              placeholder={placeholder}
-              values={note[field]}
-              onChange={(values, kind) => onUpdateList(field, values, kind)}
-            />
-          ))}
+          {dynamicCollections.map((collection) => {
+            const legacy = INSIGHT_FIELDS.find((item) => item.field === collection.id);
+            return (
+              <InlineList
+                key={collection.id}
+                title={collection.title}
+                placeholder={legacy?.placeholder || `补充${collection.title}…`}
+                values={collection.items}
+                onChange={(values, kind) => {
+                  if (note.collections?.length && onUpdateCollection) onUpdateCollection(collection.id, values, kind);
+                  else if (legacy) onUpdateList(legacy.field, values, kind);
+                }}
+              />
+            );
+          })}
         </div>
       </div>
     </article>

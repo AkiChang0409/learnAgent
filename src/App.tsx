@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FilePlus2, Loader2, Sparkles, Upload } from 'lucide-react';
 import type {
+  AgentPersonaId,
+  AgentPersonaRef,
+  AgentPersonaSummary,
   AiSettings,
   AppUpdateState,
   ChatMessage,
@@ -74,6 +77,9 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<Note[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [personas, setPersonas] = useState<AgentPersonaSummary[]>([]);
+  const [selectedPersonaId, setSelectedPersonaId] = useState<AgentPersonaId>('learning-notes');
+  const personaInitialized = useRef(false);
   const [noteGenerationTasks, setNoteGenerationTasks] = useState<NoteGenerationProgress[]>([]);
   const completedGenerationTasks = useRef(new Set<string>());
   const [emphasisAnalysisTasks, setEmphasisAnalysisTasks] = useState<EmphasisAnalysisProgress[]>([]);
@@ -91,7 +97,34 @@ export default function App() {
 
   useEffect(() => {
     window.learnAgent.getAppInfo().then((info) => setAppVersion(info.version)).catch(() => setAppVersion('未知'));
+    window.learnAgent.listAgentPersonas().then(setPersonas).catch(() => setPersonas([]));
   }, []);
+
+  useEffect(() => {
+    if (!isReady || personaInitialized.current) return;
+    personaInitialized.current = true;
+    setSelectedPersonaId(data.settings.defaultPersonaId || 'learning-notes');
+  }, [data.settings.defaultPersonaId, isReady]);
+
+  function personaRef(personaId: AgentPersonaId): AgentPersonaRef {
+    const persona = personas.find((item) => item.id === personaId);
+    return { id: personaId, version: persona?.version || 1 };
+  }
+
+  function notePersonaRef(note: Note): AgentPersonaRef {
+    return {
+      id: note.personaId || 'learning-notes',
+      version: note.personaVersion || 1
+    };
+  }
+
+  function selectDefaultPersona(personaId: AgentPersonaId) {
+    setSelectedPersonaId(personaId);
+    setData((current) => ({
+      ...current,
+      settings: { ...current.settings, defaultPersonaId: personaId }
+    }));
+  }
 
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -383,7 +416,8 @@ export default function App() {
     selectedSubject,
     setSelectedSubject,
     setSelectedNoteId,
-    pushToast
+    pushToast,
+    personaRef: personaRef(selectedPersonaId)
   });
 
   function appendUsageRecord(record?: TokenUsageRecord | null) {
@@ -600,7 +634,12 @@ export default function App() {
     setIsGenerating(true);
     try {
       const targetSubject = cleanSubjectName(selectedSubject);
-      const { taskId } = await window.learnAgent.startNoteGeneration({ input, targetSubject, settings: data.settings });
+      const { taskId } = await window.learnAgent.startNoteGeneration({
+        input,
+        targetSubject,
+        personaRef: personaRef(selectedPersonaId),
+        settings: data.settings
+      });
       setNoteGenerationTasks((current) => current.some((task) => task.taskId === taskId) ? current : [...current, {
         taskId,
         stage: 'queued',
@@ -635,6 +674,12 @@ export default function App() {
       cases: [],
       pitfalls: [],
       interviewQuestions: [],
+      personaId: selectedPersonaId,
+      personaVersion: personaRef(selectedPersonaId).version,
+      summaryLabel: personas.find((item) => item.id === selectedPersonaId)?.summaryLabel || '知识总结',
+      collections: (personas.find((item) => item.id === selectedPersonaId)?.collectionBlueprint || [])
+        .map((collection) => ({ ...collection, items: [] })),
+      documentSchemaVersion: 2,
       createdAt: now,
       updatedAt: now,
       position: rootNotePosition(data.notes, subject, topic)
@@ -857,6 +902,46 @@ export default function App() {
     updateSelectedNote((note) => ({ ...note, [field]: values }));
   }
 
+  function updateCollection(collectionId: string, values: string[], kind: ListChangeKind = 'edit') {
+    if (!selectedNote) return;
+    const previous = selectedNote.collections || [];
+    if (kind !== 'edit') {
+      const noteId = selectedNote.id;
+      const undoId = pushNoteUndo(kind === 'remove' ? '删除文档集合条目' : '添加文档集合条目', () => {
+        setData((current) => ({
+          ...current,
+          notes: current.notes.map((note) => note.id === noteId
+            ? { ...note, collections: previous, updatedAt: nowIso() }
+            : note)
+        }));
+      });
+      if (kind === 'remove') {
+        pushToast('info', '已删除一项', {
+          action: { label: '撤销', onClick: () => undoNoteChange(undoId) },
+          duration: 8000
+        });
+      }
+    }
+    updateSelectedNote((note) => ({
+      ...note,
+      collections: (note.collections || []).map((collection) => collection.id === collectionId
+        ? { ...collection, items: values }
+        : collection)
+    }));
+  }
+
+  function changeSelectedNotePersona(personaId: AgentPersonaId) {
+    const persona = personas.find((item) => item.id === personaId);
+    if (!persona) return;
+    updateSelectedNotePatch({
+      personaId,
+      personaVersion: persona.version,
+      summaryLabel: persona.summaryLabel,
+      documentSchemaVersion: 2
+    });
+    pushToast('info', `已切换为“${persona.name}”；现有正文不会改写，后续问答与回写将使用新模式。`);
+  }
+
   function updateConversationMessages(noteId: string, updater: (messages: ChatMessage[]) => ChatMessage[]) {
     setData((current) => {
       const existing = current.conversations.find((conversation) => conversation.noteId === noteId);
@@ -937,6 +1022,7 @@ export default function App() {
       note,
       previousSummary,
       messages,
+      personaRef: notePersonaRef(note),
       settings: data.settings
     });
     updateConversationMemory(note.id, result.memorySummary, summarizedMessageCount);
@@ -1009,6 +1095,13 @@ export default function App() {
         });
       }
     });
+    const collectionMap = new Map((note.collections || []).map((collection) => [collection.id, collection]));
+    for (const collection of patch.collections || []) {
+      const existing = collectionMap.get(collection.id);
+      collectionMap.set(collection.id, existing
+        ? { ...existing, title: collection.title || existing.title, items: mergeUnique(existing.items, collection.items) }
+        : collection);
+    }
 
     return {
       ...note,
@@ -1027,7 +1120,8 @@ export default function App() {
       tags: mergeUnique(note.tags, patch.tags),
       cases: mergeUnique(note.cases, patch.cases),
       pitfalls: mergeUnique(note.pitfalls, patch.pitfalls),
-      interviewQuestions: mergeUnique(note.interviewQuestions, patch.interviewQuestions)
+      interviewQuestions: mergeUnique(note.interviewQuestions, patch.interviewQuestions),
+      collections: Array.from(collectionMap.values())
     };
   }
 
@@ -1059,6 +1153,7 @@ export default function App() {
         sources,
         history: history.slice(-RECENT_HISTORY_MESSAGE_LIMIT),
         memorySummary: selectedConversation?.memorySummary || '',
+        personaRef: notePersonaRef(selectedNote),
         settings: data.settings
       });
       const assistantMessage: ChatMessage = {
@@ -1101,6 +1196,7 @@ export default function App() {
         note: selectedNote,
         memorySummary,
         messages: selectedConversation.messages.slice(-MEMORY_SUMMARY_BATCH_SIZE),
+        personaRef: notePersonaRef(selectedNote),
         settings: data.settings
       });
       updateSelectedNote((note) => mergeDistillationPatch(note, result.patch));
@@ -1365,6 +1461,8 @@ export default function App() {
         ) : selectedNote ? (
           <NoteView
             note={selectedNote}
+            personas={personas}
+            provider={data.settings.provider}
             subjectOptions={subjectOptions}
             assistantOpen={assistantOpen}
             conversationCount={selectedConversation?.messages.length || 0}
@@ -1375,6 +1473,8 @@ export default function App() {
             onRemoveSection={removeSection}
             onMoveSection={moveSection}
             onUpdateList={updateList}
+            onUpdateCollection={updateCollection}
+            onPersonaChange={changeSelectedNotePersona}
             onToggleAssistant={() => setAssistantOpen((open) => !open)}
             onNavigateSubject={switchSubject}
             onAnalyzeEmphasis={analyzeSubjectEmphasis}
@@ -1435,6 +1535,7 @@ export default function App() {
           isAsking={isAsking}
           isDistilling={isDistilling}
           settings={data.settings}
+          persona={personas.find((persona) => persona.id === (selectedNote.personaId || 'learning-notes'))}
           onChatInputChange={setChatInput}
           onAsk={askBot}
           onDistillToNote={distillConversationToNote}
@@ -1449,14 +1550,22 @@ export default function App() {
         isGenerating={isGenerating}
         isListening={isListening}
         voiceError={voiceError}
+        personas={personas}
+        personaId={selectedPersonaId}
+        provider={data.settings.provider}
         onChange={setComposer}
         onGenerate={generateNote}
         onToggleListening={toggleListening}
+        onPersonaChange={selectDefaultPersona}
         onClose={() => setShowGenerate(false)}
       />
 
       <ImportModeDialog
         selection={sourceSelection}
+        personas={personas}
+        personaId={selectedPersonaId}
+        provider={data.settings.provider}
+        onPersonaChange={selectDefaultPersona}
         onStart={startImport}
         onClose={cancelImport}
         onOpenTips={() => {

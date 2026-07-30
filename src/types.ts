@@ -12,6 +12,34 @@ export interface AiSettings {
   lastTestedAt?: string;
   lastTestStatus?: AiTestStatus;
   lastTestMessage?: string;
+  defaultPersonaId?: AgentPersonaId;
+}
+
+export type AgentPersonaId = 'learning-notes' | 'job-description-analyst' | 'codebase-technical-analyst';
+export type AgentPersonaOperation = 'generate' | 'import' | 'chat' | 'memory' | 'distill';
+export type AgentExecutionProfile = 'focused' | 'fast' | 'deep' | 'offline';
+export type AgentArtifactTopology = 'single-document' | 'knowledge-map';
+
+export interface AgentPersonaRef {
+  id: AgentPersonaId;
+  version: number;
+}
+
+export interface AgentPersonaSummary extends AgentPersonaRef {
+  name: string;
+  description: string;
+  summaryLabel: string;
+  operations: AgentPersonaOperation[];
+  executionProfiles: AgentExecutionProfile[];
+  importTopology: AgentArtifactTopology;
+  requiresModelForProfessionalAnalysis: boolean;
+  collectionBlueprint: Array<{ id: string; title: string }>;
+}
+
+export interface NoteCollection {
+  id: string;
+  title: string;
+  items: string[];
 }
 
 export type TokenUsageOperation =
@@ -95,6 +123,11 @@ export interface Note {
   cases: string[];
   pitfalls: string[];
   interviewQuestions: string[];
+  personaId?: AgentPersonaId;
+  personaVersion?: number;
+  summaryLabel?: string;
+  collections?: NoteCollection[];
+  documentSchemaVersion?: number;
   createdAt: string;
   updatedAt: string;
   searchExcerpt?: string;
@@ -164,6 +197,11 @@ export interface GeneratedNoteDraft {
   cases: string[];
   pitfalls: string[];
   interviewQuestions: string[];
+  personaId?: AgentPersonaId;
+  personaVersion?: number;
+  summaryLabel?: string;
+  collections?: NoteCollection[];
+  documentSchemaVersion?: number;
 }
 
 export interface GeneratedNoteResult {
@@ -171,6 +209,8 @@ export interface GeneratedNoteResult {
   usedFallback: boolean;
   message: string;
   usageRecord?: TokenUsageRecord | null;
+  personaRef?: AgentPersonaRef;
+  artifactTopology?: AgentArtifactTopology;
 }
 
 export interface MarkdownImportNoteDraft extends GeneratedNoteDraft {
@@ -303,6 +343,8 @@ export interface MarkdownImportResult {
   usedFallback?: boolean;
   message?: string;
   usageRecord?: TokenUsageRecord | null;
+  personaRef?: AgentPersonaRef;
+  artifactTopology?: AgentArtifactTopology;
 }
 
 export type MarkdownImportStage =
@@ -445,6 +487,7 @@ export interface NoteDistillationPatch {
   cases: string[];
   pitfalls: string[];
   interviewQuestions: string[];
+  collections?: NoteCollection[];
 }
 
 export interface NoteDistillationResult {
@@ -499,12 +542,13 @@ export interface LearnAgentBridge {
   retrieveContext: (payload: { question: string; currentNote: Note; limit?: number }) => Promise<RagContextResult>;
   exportSyncPackage: () => Promise<SyncExportResult>;
   importSyncPackage: () => Promise<SyncImportResult>;
-  startNoteGeneration: (payload: { input: string; targetSubject: string; settings: AiSettings }) => Promise<{ taskId: string }>;
+  listAgentPersonas: () => Promise<AgentPersonaSummary[]>;
+  startNoteGeneration: (payload: { input: string; targetSubject: string; personaRef: AgentPersonaRef; settings: AiSettings }) => Promise<{ taskId: string }>;
   onNoteGenerationProgress: (handler: (progress: NoteGenerationProgress) => void) => () => void;
   startEmphasisAnalysis: (payload: { subject: string; notes: EmphasisAnalysisNoteInput[]; settings: AiSettings }) => Promise<{ taskId: string }>;
   onEmphasisAnalysisProgress: (handler: (progress: EmphasisAnalysisProgress) => void) => () => void;
   selectMarkdownSource: () => Promise<MarkdownSourceSelection>;
-  startMarkdownImport: (payload: { selectionId: string; mode: MarkdownImportMode; settings: AiSettings }) => Promise<MarkdownImportResult>;
+  startMarkdownImport: (payload: { selectionId: string; mode: MarkdownImportMode; personaRef: AgentPersonaRef; settings: AiSettings }) => Promise<MarkdownImportResult>;
   cancelMarkdownImport: (payload: { selectionId: string }) => Promise<{ canceled: boolean }>;
   onMarkdownImportProgress: (handler: (progress: MarkdownImportProgress) => void) => () => void;
   chatWithNote: (payload: {
@@ -514,18 +558,21 @@ export interface LearnAgentBridge {
     sources: RagSource[];
     history: ChatMessage[];
     memorySummary?: string;
+    personaRef: AgentPersonaRef;
     settings: AiSettings;
   }) => Promise<ChatResult>;
   summarizeConversation: (payload: {
     note: Note;
     previousSummary?: string;
     messages: ChatMessage[];
+    personaRef: AgentPersonaRef;
     settings: AiSettings;
   }) => Promise<ConversationMemoryResult>;
   distillConversationToNote: (payload: {
     note: Note;
     memorySummary?: string;
     messages: ChatMessage[];
+    personaRef: AgentPersonaRef;
     settings: AiSettings;
   }) => Promise<NoteDistillationResult>;
   testConnection: (payload: { settings: AiSettings }) => Promise<AiConnectionTestResult>;

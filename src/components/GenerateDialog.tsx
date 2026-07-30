@@ -1,6 +1,8 @@
 import { useCallback, useRef } from 'react';
 import { Loader2, Mic, MicOff, Sparkles, X } from 'lucide-react';
 import { useModalFocus } from '../hooks/useModalFocus';
+import type { AgentPersonaId, AgentPersonaSummary, AiProvider } from '../types';
+import { PersonaSelector } from './PersonaSelector';
 
 export function GenerateDialog({
   open,
@@ -9,9 +11,13 @@ export function GenerateDialog({
   isGenerating,
   isListening,
   voiceError,
+  personas = [],
+  personaId = 'learning-notes',
+  provider = 'local',
   onChange,
   onGenerate,
   onToggleListening,
+  onPersonaChange = () => undefined,
   onClose
 }: {
   open: boolean;
@@ -20,9 +26,13 @@ export function GenerateDialog({
   isGenerating: boolean;
   isListening: boolean;
   voiceError: string;
+  personas?: AgentPersonaSummary[];
+  personaId?: AgentPersonaId;
+  provider?: AiProvider;
   onChange: (value: string) => void;
   onGenerate: () => void;
   onToggleListening: () => void;
+  onPersonaChange?: (value: AgentPersonaId) => void;
   onClose: () => void;
 }) {
   const dialogRef = useRef<HTMLElement>(null);
@@ -31,6 +41,9 @@ export function GenerateDialog({
   useModalFocus(open, dialogRef, close, inputRef);
 
   if (!open) return null;
+  const selectedPersona = personas.find((persona) => persona.id === personaId);
+  const personaBlocked = provider === 'local' && Boolean(selectedPersona?.requiresModelForProfessionalAnalysis);
+  const isLearningPersona = personaId === 'learning-notes';
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -39,7 +52,7 @@ export function GenerateDialog({
         className="generate-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="AI 生成笔记"
+        aria-label="AI 专业生成"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="generate-head">
@@ -48,8 +61,8 @@ export function GenerateDialog({
               <Sparkles size={17} />
             </span>
             <div>
-              <strong>AI 生成笔记</strong>
-              <span>将整理进「{targetSubject}」，先收敛范围，再生成一篇聚焦笔记</span>
+              <strong>{selectedPersona?.name || 'AI 生成笔记'}</strong>
+              <span>将整理进「{targetSubject}」，使用当前 Persona 的专业流程生成文档</span>
             </div>
           </div>
           <button className="icon-button ghost" onClick={onClose} aria-label="关闭" title="关闭">
@@ -57,11 +70,21 @@ export function GenerateDialog({
           </button>
         </div>
 
+        {personas.length > 0 && (
+          <PersonaSelector
+            personas={personas}
+            value={personaId}
+            provider={provider}
+            executionProfile="focused"
+            onChange={onPersonaChange}
+          />
+        )}
+
         <div className="generate-scope-guide" aria-label="生成标准">
-          <strong>单篇生成标准</strong>
-          <span>只解决一个核心问题</span>
+          <strong>{isLearningPersona ? '单篇生成标准' : '专业分析标准'}</strong>
+          <span>{isLearningPersona ? '只解决一个核心问题' : '区分事实、推断与未知'}</span>
           <span>不整段复制材料</span>
-          <span>解释机制、边界与迁移</span>
+          <span>{isLearningPersona ? '解释机制、边界与迁移' : '形成领域结论与行动建议'}</span>
         </div>
 
         <textarea
@@ -77,11 +100,15 @@ export function GenerateDialog({
               onGenerate();
             }
           }}
-          placeholder="写下一个主题或核心问题，也可以粘贴材料并说明最想理解的部分。例如：结合这份岗位 JD，只分析 MLOps 工程师最核心的能力链路，不要复述全部职责…"
+          placeholder={personaId === 'job-description-analyst'
+            ? '粘贴岗位描述；如需个人匹配分析，请同时提供真实经历。没有简历时只会分析岗位要求与准备方向。'
+            : personaId === 'codebase-technical-analyst'
+              ? '粘贴由 Codex Skill 生成的代码分析材料，并说明最关注的架构、数据流或技术取舍。'
+              : '写下一个主题或核心问题，也可以粘贴材料并说明最想理解的部分。'}
         />
 
         <div className="generate-input-meta">
-          <span>AI 会先排除无关内容；材料越长，越建议明确“只讲什么”。</span>
+          <span>{personaBlocked ? '当前专业 Persona 需要先在设置中配置模型。' : 'AI 会先排除无关内容；材料越长，越建议明确“只讲什么”。'}</span>
           <span>{value.length.toLocaleString()} / 20,000</span>
         </div>
 
@@ -97,9 +124,9 @@ export function GenerateDialog({
           </button>
           {voiceError && <span className="voice-error">{voiceError}</span>}
           <span className="generate-hint">Ctrl/⌘ + Enter 生成</span>
-          <button className="primary-action" onClick={onGenerate} disabled={!value.trim() || isGenerating}>
+          <button className="primary-action" onClick={onGenerate} disabled={!value.trim() || isGenerating || personaBlocked}>
             {isGenerating ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-            生成聚焦笔记
+            {isLearningPersona ? '生成聚焦笔记' : '开始专业分析'}
           </button>
         </div>
       </section>

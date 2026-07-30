@@ -40,11 +40,13 @@ function noteChunks(note: Note, priority = 1): Chunk[] {
     });
   });
 
-  const grouped = [
-    ['案例', note.cases],
-    ['易错点', note.pitfalls],
-    ['面试问题', note.interviewQuestions]
-  ] as const;
+  const grouped: Array<readonly [string, string[]]> = note.collections?.length
+    ? note.collections.map((collection) => [collection.title, collection.items] as const)
+    : [
+        ['案例', note.cases],
+        ['易错点', note.pitfalls],
+        ['面试问题', note.interviewQuestions]
+      ];
 
   grouped.forEach(([section, values]) => {
     if (values.length) {

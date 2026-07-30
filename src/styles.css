@@ -2860,7 +2860,7 @@ label select,
   gap: 4px;
   margin: 10px 0;
   padding: 10px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 10px;
   color: var(--text-muted);
   font-size: 12px;
@@ -3356,4 +3356,60 @@ label select,
     justify-content: start;
     overflow: auto;
   }
+}
+.persona-selector {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr);
+  align-items: center;
+  gap: 6px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.persona-selector-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.persona-selector select {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 7px 9px;
+}
+
+.persona-selector small {
+  grid-column: 1 / -1;
+  color: var(--ink-faint);
+  line-height: 1.5;
+}
+
+.persona-selector.compact {
+  display: inline-flex;
+  padding: 4px 7px;
+  border-radius: 9px;
+  gap: 6px;
+}
+
+.persona-selector.compact .persona-selector-label {
+  font-size: 11px;
+}
+
+.persona-selector.compact select {
+  max-width: 180px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.import-mode-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }

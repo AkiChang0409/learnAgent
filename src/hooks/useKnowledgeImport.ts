@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import type { AppData, Conversation, MarkdownImportMode, MarkdownImportProgress, MarkdownSourceSelection, Note } from '../types';
+import type { AgentPersonaRef, AppData, Conversation, MarkdownImportMode, MarkdownImportProgress, MarkdownSourceSelection, Note } from '../types';
 import { cleanSubjectName, createId, ensureSubjects, markdownDraftToNotes, nowIso, subjectKnowledgeMapToNotes } from '../services/notes';
 
 type SetAppData = Dispatch<SetStateAction<AppData>>;
@@ -25,7 +25,8 @@ export function useKnowledgeImport({
   selectedSubject,
   setSelectedSubject,
   setSelectedNoteId,
-  pushToast
+  pushToast,
+  personaRef
 }: {
   data: AppData;
   setData: SetAppData;
@@ -33,6 +34,7 @@ export function useKnowledgeImport({
   setSelectedSubject: (subject: string | null) => void;
   setSelectedNoteId: (noteId: string) => void;
   pushToast: (type: ToastType, message: string) => void;
+  personaRef: AgentPersonaRef;
 }) {
   const [isImportingMarkdown, setIsImportingMarkdown] = useState(false);
   const [importProgress, setImportProgress] = useState<MarkdownImportProgress | null>(null);
@@ -76,6 +78,7 @@ export function useKnowledgeImport({
       const result = await window.learnAgent.startMarkdownImport({
         selectionId: selection.selectionId,
         mode,
+        personaRef,
         settings: data.settings
       });
       if (result.canceled) {

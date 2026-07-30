@@ -1,5 +1,5 @@
 import { Brain, Loader2, MessageSquare, NotebookPen, Sparkles, X } from 'lucide-react';
-import type { ChatMessage, Conversation, Note } from '../types';
+import type { AgentPersonaSummary, ChatMessage, Conversation, Note } from '../types';
 import { modelStatusText, providerDisplayName } from '../services/settings';
 import type { AiSettings } from '../types';
 
@@ -11,6 +11,7 @@ export function AssistantPanel({
   isAsking,
   isDistilling,
   settings,
+  persona,
   onChatInputChange,
   onAsk,
   onDistillToNote,
@@ -23,6 +24,7 @@ export function AssistantPanel({
   isAsking: boolean;
   isDistilling: boolean;
   settings: AiSettings;
+  persona?: AgentPersonaSummary;
   onChatInputChange: (value: string) => void;
   onAsk: () => void;
   onDistillToNote: () => void;
@@ -38,7 +40,7 @@ export function AssistantPanel({
         <div className="assistant-title">
           <Sparkles size={17} />
           <div>
-            <strong>笔记助手</strong>
+            <strong>{persona?.name || '笔记助手'}</strong>
             <span>{selectedNote ? selectedNote.title || '无标题笔记' : '未选择笔记'}</span>
           </div>
         </div>
@@ -65,7 +67,7 @@ export function AssistantPanel({
         {!messages.length && !isAsking && (
           <div className="chat-empty">
             <MessageSquare size={26} />
-            <span>围绕这篇笔记提问，助手会引用相关片段作答。</span>
+            <span>{persona ? `以“${persona.name}”模式围绕当前内容提问，助手会引用相关片段作答。` : '围绕这篇笔记提问，助手会引用相关片段作答。'}</span>
           </div>
         )}
       </div>

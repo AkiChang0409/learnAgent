@@ -69,3 +69,24 @@ describe('NoteView deletion intents', () => {
     expect(props.onRemoveSection).toHaveBeenCalledWith('section-1');
   });
 });
+
+describe('NoteView Persona document shape', () => {
+  it('renders a Persona summary label and routes dynamic collection edits', async () => {
+    const onUpdateCollection = vi.fn();
+    renderNote({
+      note: {
+        ...note,
+        personaId: 'job-description-analyst',
+        personaVersion: 1,
+        summaryLabel: '岗位分析摘要',
+        collections: [{ id: 'core-requirements', title: '核心要求', items: ['SQL'] }]
+      },
+      onUpdateCollection
+    });
+
+    expect(screen.getByText('岗位分析摘要')).toBeInTheDocument();
+    expect(screen.getByText('核心要求')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '删除' }));
+    expect(onUpdateCollection).toHaveBeenCalledWith('core-requirements', [], 'remove');
+  });
+});

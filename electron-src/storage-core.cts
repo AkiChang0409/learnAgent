@@ -4,7 +4,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const initSqlJs = require('sql.js');
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const DEFAULT_SUBJECT_NAME = '通用学习';
 
 function defaultData() {
@@ -18,6 +18,7 @@ function defaultData() {
       provider: 'local',
       endpoint: 'https://api.openai.com/v1/chat/completions',
       model: 'gpt-4.1-mini',
+      defaultPersonaId: 'learning-notes',
       lastTestStatus: 'idle',
       lastTestMessage: '尚未测试连接'
     }
@@ -106,6 +107,11 @@ function createStorage(userDataPath) {
         cases_json TEXT NOT NULL,
         pitfalls_json TEXT NOT NULL,
         interview_questions_json TEXT NOT NULL,
+        persona_id TEXT NOT NULL DEFAULT 'learning-notes',
+        persona_version INTEGER NOT NULL DEFAULT 1,
+        summary_label TEXT NOT NULL DEFAULT '知识总结',
+        collections_json TEXT NOT NULL DEFAULT '[]',
+        document_schema_version INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -170,6 +176,11 @@ function createStorage(userDataPath) {
     ensureColumn('notes', 'parent_note_id', 'TEXT');
     ensureColumn('notes', 'position', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn('notes', 'summary_rich_json', "TEXT NOT NULL DEFAULT ''");
+    ensureColumn('notes', 'persona_id', "TEXT NOT NULL DEFAULT 'learning-notes'");
+    ensureColumn('notes', 'persona_version', 'INTEGER NOT NULL DEFAULT 1');
+    ensureColumn('notes', 'summary_label', "TEXT NOT NULL DEFAULT '知识总结'");
+    ensureColumn('notes', 'collections_json', "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn('notes', 'document_schema_version', 'INTEGER NOT NULL DEFAULT 1');
     ensureColumn('note_sections', 'content_rich_json', "TEXT NOT NULL DEFAULT ''");
     ensureColumn('usage_records', 'base_estimated_cost_usd', 'REAL');
     ensureColumn('usage_records', 'calibration_multiplier', 'REAL NOT NULL DEFAULT 1');
@@ -230,6 +241,11 @@ function createStorage(userDataPath) {
     ensureColumn('agent_steps', 'input_summary', "TEXT NOT NULL DEFAULT ''");
     ensureColumn('agent_steps', 'output_summary', "TEXT NOT NULL DEFAULT ''");
     ensureColumn('agent_steps', 'usage_record_id', "TEXT NOT NULL DEFAULT ''");
+    ensureColumn('agent_runs', 'persona_id', "TEXT NOT NULL DEFAULT 'learning-notes'");
+    ensureColumn('agent_runs', 'persona_version', 'INTEGER NOT NULL DEFAULT 1');
+    ensureColumn('agent_runs', 'operation', "TEXT NOT NULL DEFAULT 'import'");
+    ensureColumn('agent_runs', 'execution_profile', "TEXT NOT NULL DEFAULT 'fast'");
+    db.run("INSERT OR REPLACE INTO metadata (key, value) VALUES ('migration_v8', 'agent-personas-dynamic-documents')");
     rebuildIndexes();
   }
 
@@ -314,9 +330,11 @@ function createStorage(userDataPath) {
     await init();
     db.run(`
       INSERT OR REPLACE INTO agent_runs (
-        id, mode, status, source_name, estimated_calls, actual_calls, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [run.id, run.mode || 'fast', run.status || 'running', run.sourceName || '', Number(run.estimatedCalls || 0), Number(run.actualCalls || 0), run.createdAt, run.updatedAt]);
+        id, mode, status, source_name, estimated_calls, actual_calls, created_at, updated_at,
+        persona_id, persona_version, operation, execution_profile
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [run.id, run.mode || 'fast', run.status || 'running', run.sourceName || '', Number(run.estimatedCalls || 0), Number(run.actualCalls || 0), run.createdAt, run.updatedAt,
+      run.personaId || 'learning-notes', Number(run.personaVersion || 1), run.operation || 'import', run.executionProfile || run.mode || 'fast']);
     await persist();
   }
 
@@ -407,17 +425,23 @@ function createStorage(userDataPath) {
       }
       for (const note of notes.upsert) {
         db.run(`INSERT INTO notes (id, parent_note_id, position, title, subject, topic, tags, summary, summary_rich_json,
-          cases_json, pitfalls_json, interview_questions_json, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          cases_json, pitfalls_json, interview_questions_json, persona_id, persona_version, summary_label,
+          collections_json, document_schema_version, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET parent_note_id=excluded.parent_note_id, position=excluded.position,
           title=excluded.title, subject=excluded.subject, topic=excluded.topic, tags=excluded.tags,
           summary=excluded.summary, summary_rich_json=excluded.summary_rich_json,
           cases_json=excluded.cases_json, pitfalls_json=excluded.pitfalls_json,
-          interview_questions_json=excluded.interview_questions_json, created_at=excluded.created_at,
+          interview_questions_json=excluded.interview_questions_json, persona_id=excluded.persona_id,
+          persona_version=excluded.persona_version, summary_label=excluded.summary_label,
+          collections_json=excluded.collections_json, document_schema_version=excluded.document_schema_version,
+          created_at=excluded.created_at,
           updated_at=excluded.updated_at`, [
           note.id, note.parentId || null, Number(note.position || 0), note.title, note.subject, note.topic,
           JSON.stringify(note.tags || []), note.summary || '', richJson(note.summaryRich), JSON.stringify(note.cases || []),
-          JSON.stringify(note.pitfalls || []), JSON.stringify(note.interviewQuestions || []), note.createdAt, note.updatedAt
+          JSON.stringify(note.pitfalls || []), JSON.stringify(note.interviewQuestions || []),
+          note.personaId || 'learning-notes', Number(note.personaVersion || 1), note.summaryLabel || '知识总结',
+          JSON.stringify(note.collections || []), Number(note.documentSchemaVersion || 1), note.createdAt, note.updatedAt
         ]);
         db.run('DELETE FROM note_sections WHERE note_id = ?', [note.id]);
         (note.sections || []).forEach((section, index) => db.run(
@@ -491,8 +515,9 @@ function createStorage(userDataPath) {
       const insertNote = db.prepare(`
         INSERT INTO notes (
           id, parent_note_id, position, title, subject, topic, tags, summary, summary_rich_json, cases_json,
-          pitfalls_json, interview_questions_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          pitfalls_json, interview_questions_json, persona_id, persona_version, summary_label, collections_json,
+          document_schema_version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       const insertSection = db.prepare(`
         INSERT INTO note_sections (id, note_id, heading, content, content_rich_json, position)
@@ -541,6 +566,11 @@ function createStorage(userDataPath) {
           JSON.stringify(note.cases || []),
           JSON.stringify(note.pitfalls || []),
           JSON.stringify(note.interviewQuestions || []),
+          note.personaId || 'learning-notes',
+          Number(note.personaVersion || 1),
+          note.summaryLabel || '知识总结',
+          JSON.stringify(note.collections || []),
+          Number(note.documentSchemaVersion || 1),
           note.createdAt,
           note.updatedAt
         ]);
@@ -741,7 +771,19 @@ function createStorage(userDataPath) {
       sectionsByNote.set(row.note_id, list);
     });
 
-    return rows.map((row) => ({
+    return rows.map((row) => {
+      const cases = safeParse(row.cases_json, []);
+      const pitfalls = safeParse(row.pitfalls_json, []);
+      const interviewQuestions = safeParse(row.interview_questions_json, []);
+      const storedCollections = safeParse(row.collections_json, []);
+      const collections = Array.isArray(storedCollections) && storedCollections.length
+        ? storedCollections
+        : [
+            { id: 'cases', title: '案例', items: cases },
+            { id: 'pitfalls', title: '易错点', items: pitfalls },
+            { id: 'review-questions', title: '复习与面试问题', items: interviewQuestions }
+          ].filter((collection) => collection.items.length);
+      return {
       id: row.id,
       parentId: row.parent_note_id || undefined,
       position: Number(row.position || 0),
@@ -752,12 +794,18 @@ function createStorage(userDataPath) {
       summary: row.summary,
       summaryRich: sanitizeStoredRichText(safeParse(row.summary_rich_json, null)) || undefined,
       sections: sectionsByNote.get(row.id) || [],
-      cases: safeParse(row.cases_json, []),
-      pitfalls: safeParse(row.pitfalls_json, []),
-      interviewQuestions: safeParse(row.interview_questions_json, []),
+      cases,
+      pitfalls,
+      interviewQuestions,
+      personaId: row.persona_id || 'learning-notes',
+      personaVersion: Number(row.persona_version || 1),
+      summaryLabel: row.summary_label || '知识总结',
+      collections,
+      documentSchemaVersion: Number(row.document_schema_version || 1),
       createdAt: row.created_at,
       updatedAt: row.updated_at
-    }));
+      };
+    });
   }
 
   function readConversations(noteIds = null) {
@@ -1075,9 +1123,15 @@ function noteToChunks(note) {
 
   push('summary', '摘要', note.summary || '');
   (note.sections || []).forEach((section) => push('section', section.heading || '小节', section.content || ''));
-  if (note.cases?.length) push('cases', '案例', note.cases.join('\n'));
-  if (note.pitfalls?.length) push('pitfalls', '易错点', note.pitfalls.join('\n'));
-  if (note.interviewQuestions?.length) push('interviewQuestions', '面试问题', note.interviewQuestions.join('\n'));
+  if (note.collections?.length) {
+    note.collections.forEach((collection) => {
+      if (collection?.items?.length) push(`collection:${collection.id || 'custom'}`, collection.title || '补充内容', collection.items.join('\n'));
+    });
+  } else {
+    if (note.cases?.length) push('cases', '案例', note.cases.join('\n'));
+    if (note.pitfalls?.length) push('pitfalls', '易错点', note.pitfalls.join('\n'));
+    if (note.interviewQuestions?.length) push('interviewQuestions', '面试问题', note.interviewQuestions.join('\n'));
+  }
   return chunks;
 }
 
@@ -1291,6 +1345,9 @@ function applyChangeBatch(current, changes) {
 
 function sanitizeSettings(settings) {
   const { apiKey, ...safeSettings } = settings || {};
+  if (!['learning-notes', 'job-description-analyst', 'codebase-technical-analyst'].includes(safeSettings.defaultPersonaId)) {
+    safeSettings.defaultPersonaId = 'learning-notes';
+  }
   return safeSettings;
 }
 

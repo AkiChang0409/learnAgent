@@ -11,8 +11,8 @@ function stripSearchFields(note) {
 function createSyncPackage(data) {
   const { apiKey: _legacyApiKey, ...safeSettings } = data?.settings || {};
   return {
-    app: 'LearnAgent', packageVersion: 2, exportedAt: new Date().toISOString(),
-    schemaVersion: data?.schemaVersion || 7,
+    app: 'LearnAgent', packageVersion: 3, exportedAt: new Date().toISOString(),
+    schemaVersion: data?.schemaVersion || 8,
     data: {
       subjects: data?.subjects || [], notes: (data?.notes || []).map(stripSearchFields),
       conversations: data?.conversations || [], usageRecords: data?.usageRecords || [],
@@ -90,11 +90,16 @@ function mergeSyncData(currentData, importPayload) {
   const conversations = conversationMerge.items.filter((conversation) => noteIds.has(conversation.noteId));
   const usageMerge = mergeUsageRecords(currentData.usageRecords || [], incoming.usageRecords);
   const importedSettings = incoming.settings || {};
+  const importedPersonaId = ['learning-notes', 'job-description-analyst', 'codebase-technical-analyst']
+    .includes(importedSettings.defaultPersonaId)
+    ? importedSettings.defaultPersonaId
+    : currentData.settings.defaultPersonaId || 'learning-notes';
   return {
     data: { ...currentData, subjects: subjectMerge.items, notes, conversations, usageRecords: usageMerge.items,
       settings: { ...currentData.settings, provider: importedSettings.provider || currentData.settings.provider,
         endpoint: importedSettings.endpoint ?? currentData.settings.endpoint,
-        model: importedSettings.model ?? currentData.settings.model } },
+        model: importedSettings.model ?? currentData.settings.model,
+        defaultPersonaId: importedPersonaId } },
     summary: { notesAdded: notesMerge.added, notesUpdated: notesMerge.updated,
       subjectsAdded: subjectMerge.added, subjectsUpdated: subjectMerge.updated,
       conversationsAdded: conversationMerge.added, conversationsUpdated: conversationMerge.updated,
@@ -106,7 +111,7 @@ function validateSyncPackage(value) {
   if (!value || typeof value !== 'object') throw new Error('同步包必须是 JSON 对象');
   if (value.app && value.app !== 'LearnAgent') throw new Error('这不是 LearnAgent 同步包');
   const version = Number(value.packageVersion || 1);
-  if (![1, 2].includes(version)) throw new Error(`不支持的同步包版本：${version}`);
+  if (![1, 2, 3].includes(version)) throw new Error(`不支持的同步包版本：${version}`);
   const source = value.data && typeof value.data === 'object' ? value.data : value;
   for (const key of ['subjects', 'notes', 'conversations', 'usageRecords']) {
     if (source[key] !== undefined && !Array.isArray(source[key])) throw new Error(`同步包字段 ${key} 必须是数组`);
@@ -116,6 +121,25 @@ function validateSyncPackage(value) {
         throw new Error(`同步包字段 ${key} 包含缺失或重复主键`);
       }
       ids.add(item.id);
+      if (key === 'notes') {
+        if (item.personaId !== undefined
+          && !['learning-notes', 'job-description-analyst', 'codebase-technical-analyst'].includes(item.personaId)) {
+          throw new Error(`同步包包含未知 Agent Persona：${item.personaId}`);
+        }
+        if (item.personaVersion !== undefined && (!Number.isSafeInteger(item.personaVersion) || item.personaVersion !== 1)) {
+          throw new Error('同步包包含不支持的 Agent Persona 版本');
+        }
+        if (item.collections !== undefined && (!Array.isArray(item.collections) || item.collections.length > 8)) {
+          throw new Error('同步包笔记动态集合格式无效');
+        }
+        for (const collection of item.collections || []) {
+          if (!collection || typeof collection.id !== 'string' || typeof collection.title !== 'string'
+            || !Array.isArray(collection.items) || collection.items.length > 30
+            || collection.items.some((value) => typeof value !== 'string')) {
+            throw new Error('同步包笔记动态集合格式无效');
+          }
+        }
+      }
     }
   }
   return value;

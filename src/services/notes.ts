@@ -4,7 +4,7 @@ import { richContentFromDraft, richTextToPlainText } from './rich-text';
 export const DEFAULT_SUBJECT_NAME = '通用学习';
 
 export const emptyData: AppData = {
-  schemaVersion: 7,
+  schemaVersion: 8,
   subjects: [],
   notes: [],
   conversations: [],
@@ -13,6 +13,7 @@ export const emptyData: AppData = {
     provider: 'local',
     endpoint: 'https://api.openai.com/v1/chat/completions',
     model: 'gpt-4.1-mini',
+    defaultPersonaId: 'learning-notes',
     lastTestStatus: 'idle',
     lastTestMessage: '尚未测试连接'
   }
@@ -94,6 +95,11 @@ export function draftToNote(draft: GeneratedNoteDraft): Note {
     cases: normalizeList(draft.cases),
     pitfalls: normalizeList(draft.pitfalls),
     interviewQuestions: normalizeList(draft.interviewQuestions),
+    personaId: draft.personaId || 'learning-notes',
+    personaVersion: draft.personaVersion || 1,
+    summaryLabel: draft.summaryLabel || '知识总结',
+    collections: normalizeCollections(draft.collections),
+    documentSchemaVersion: draft.documentSchemaVersion || 1,
     createdAt: now,
     updatedAt: now
   };
@@ -112,6 +118,7 @@ export function markdownDraftToNotes(draft: MarkdownImportNoteDraft): Note[] {
 export function subjectKnowledgeMapToNotes(map: SubjectKnowledgeMap): Note[] {
   const subject = map.subject || '综合学习';
   const notes: Note[] = [];
+  const firstDraft = map.topics?.flatMap((topic) => topic.notes || [])[0];
 
   if (map.overview?.trim()) {
     notes.push(draftToNote({
@@ -132,7 +139,12 @@ export function subjectKnowledgeMapToNotes(map: SubjectKnowledgeMap): Note[] {
       ],
       cases: [],
       pitfalls: [],
-      interviewQuestions: [`请概括${subject}这套知识地图的核心结构。`]
+      interviewQuestions: [`请概括${subject}这套知识地图的核心结构。`],
+      personaId: firstDraft?.personaId,
+      personaVersion: firstDraft?.personaVersion,
+      summaryLabel: firstDraft?.summaryLabel,
+      documentSchemaVersion: firstDraft?.documentSchemaVersion,
+      collections: []
     }));
   }
 
@@ -181,6 +193,18 @@ export function subjectKnowledgeMapToNotes(map: SubjectKnowledgeMap): Note[] {
 export function normalizeList(values: unknown) {
   if (!Array.isArray(values)) return [];
   return values.map((value) => String(value).trim()).filter(Boolean);
+}
+
+export function normalizeCollections(values: unknown) {
+  if (!Array.isArray(values)) return [];
+  return values.slice(0, 8).map((value, index) => {
+    const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+    return {
+      id: String(source.id || `collection-${index + 1}`),
+      title: String(source.title || '补充内容'),
+      items: normalizeList(source.items)
+    };
+  }).filter((collection) => collection.items.length);
 }
 
 export function formatDate(value: string) {

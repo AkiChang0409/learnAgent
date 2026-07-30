@@ -142,15 +142,25 @@ describe('revisioned storage', () => {
           }]
         }
       }],
+      personaId: 'job-description-analyst',
+      personaVersion: 1,
+      summaryLabel: '岗位分析摘要',
+      documentSchemaVersion: 2,
+      collections: [{ id: 'implicit-signals', title: '隐含信号', items: ['隐含协作信号'] }],
       updatedAt: '2026-01-03'
     };
     await storage.applyChanges({ baseRevision: 1, changes: { notes: { upsert: [updated] } } });
     const snapshot = await storage.loadSnapshot();
-    expect(snapshot.data.schemaVersion).toBe(7);
+    expect(snapshot.data.schemaVersion).toBe(8);
     expect(snapshot.data.notes[0].summaryRich.content).toHaveLength(1);
     expect(snapshot.data.notes[0].summaryRich.content[0].content[0].marks).toEqual([{ type: 'bold' }]);
     expect(snapshot.data.notes[0].sections[0].contentRich.content[0].type).toBe('table');
+    expect(snapshot.data.notes[0]).toMatchObject({
+      personaId: 'job-description-analyst', summaryLabel: '岗位分析摘要', documentSchemaVersion: 2
+    });
+    expect(snapshot.data.notes[0].collections[0].items).toEqual(['隐含协作信号']);
     expect((await storage.searchNotes('快速'))[0]?.id).toBe('n1');
+    expect((await storage.searchNotes('隐含协作信号'))[0]?.id).toBe('n1');
   });
 
   it('deletes dependent conversations when a note is deleted', async () => {
@@ -168,7 +178,7 @@ describe('revisioned storage', () => {
     expect(snapshot.data.conversations).toEqual([]);
   });
 
-  it('backs up and migrates a schema v4 database through v5, v6 and v7', async () => {
+  it('backs up and migrates a schema v4 database through v5-v8', async () => {
     const root = await tempRoot();
     const legacy = new SQL.Database();
     legacy.run("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -181,7 +191,7 @@ describe('revisioned storage', () => {
     const storage = createStorage(root);
     const snapshot = await storage.loadSnapshot();
     expect(snapshot.revision).toBe(7);
-    expect(snapshot.data.schemaVersion).toBe(7);
+    expect(snapshot.data.schemaVersion).toBe(8);
     await expect(stat(path.join(root, 'learn-agent.sqlite.pre-v4-migration.backup'))).resolves.toBeTruthy();
   });
 });

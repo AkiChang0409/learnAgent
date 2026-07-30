@@ -53,7 +53,19 @@ describe('IPC security boundary', () => {
     expect(() => validatePayload('settings:set-api-key', ['x'.repeat(16_385)])).toThrow('API Key');
     expect(() => validatePayload('ai:start-note-generation', [{ input: '', targetSubject: '计算机' }])).toThrow('生成内容');
     expect(() => validatePayload('ai:start-note-generation', [{ input: '并发', targetSubject: 'x'.repeat(201) }])).toThrow('目标学科');
-    expect(() => validatePayload('ai:start-note-generation', [{ input: '并发', targetSubject: '计算机', settings: {} }])).not.toThrow();
+    expect(() => validatePayload('ai:start-note-generation', [{
+      input: '并发', targetSubject: '计算机', personaRef: { id: 'learning-notes', version: 1 }, settings: { provider: 'local' }
+    }])).not.toThrow();
+    expect(() => validatePayload('ai:start-note-generation', [{
+      input: '并发', targetSubject: '计算机', personaRef: { id: 'invented-persona', version: 1 }, settings: { provider: 'local' }
+    }])).toThrow('未知 Agent Persona');
+    expect(() => validatePayload('ai:start-note-generation', [{
+      input: '分析岗位', targetSubject: '职业', personaRef: { id: 'job-description-analyst', version: 1 }, settings: { provider: 'local' }
+    }])).toThrow('需要配置模型');
+    expect(() => validatePayload('data:apply-changes', [{
+      baseRevision: 0,
+      changes: { notes: { upsert: [{ id: 'n1', personaId: 'learning-notes', personaVersion: 1, collections: 'bad' }] } }
+    }])).toThrow('动态集合');
     expect(() => validatePayload('ai:start-emphasis-analysis', [{ subject: '计算机', notes: [] }])).toThrow('笔记数量');
     expect(() => validatePayload('ai:start-emphasis-analysis', [{
       subject: '计算机',
@@ -100,11 +112,12 @@ describe('provider policy and accounting', () => {
 describe('sync and import contracts', () => {
   it('reads v1 packages but rejects duplicate ids and unknown versions', () => {
     expect(validateSyncPackage({ packageVersion: 1, notes: [] })).toBeTruthy();
-    expect(() => validateSyncPackage({ packageVersion: 3, data: {} })).toThrow('版本');
+    expect(validateSyncPackage({ packageVersion: 3, data: {} })).toBeTruthy();
+    expect(() => validateSyncPackage({ packageVersion: 4, data: {} })).toThrow('版本');
     expect(() => validateSyncPackage({ data: { notes: [{ id: 'n' }, { id: 'n' }] } })).toThrow('重复主键');
   });
 
-  it('keeps optional rich text in v2 sync packages while preserving plain-text fallback', () => {
+  it('keeps optional rich text in v3 sync packages while preserving plain-text fallback', () => {
     const rich = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '重点' }] }] };
     const note = {
       id: 'n-rich', title: '富文本', subject: '学习', topic: '编辑', tags: [],
@@ -113,10 +126,10 @@ describe('sync and import contracts', () => {
       cases: [], pitfalls: [], interviewQuestions: [], createdAt: '2026-07-24', updatedAt: '2026-07-24'
     };
     const syncPackage = createSyncPackage({
-      schemaVersion: 7, subjects: [], notes: [note], conversations: [], usageRecords: [], settings: { provider: 'local' }
+      schemaVersion: 8, subjects: [], notes: [note], conversations: [], usageRecords: [], settings: { provider: 'local' }
     });
-    expect(syncPackage.packageVersion).toBe(2);
-    expect(syncPackage.schemaVersion).toBe(7);
+    expect(syncPackage.packageVersion).toBe(3);
+    expect(syncPackage.schemaVersion).toBe(8);
     expect(syncPackage.data.notes[0]).toMatchObject({ summary: '重点', summaryRich: rich });
     const merged = mergeSyncData({
       subjects: [], notes: [], conversations: [], usageRecords: [], settings: { provider: 'local' }

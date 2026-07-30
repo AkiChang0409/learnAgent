@@ -10,6 +10,17 @@ const { createModelProvider } = require('./model-provider.cjs');
 const { createSyncPackage, mergeSyncData, validateSyncPackage } = require('./sync-package.cjs');
 const { IMPORT_LIMITS, validateImportPreflight, estimatedImportCalls } = require('./import-limits.cjs');
 const { AGENT_REGISTRY } = require('./agent-registry.cjs');
+const { createAgentRuntime } = require('./agent-runtime.cjs');
+const { localPersonaQualityIssues } = require('./persona-quality.cjs');
+const {
+  composePersonaSystem,
+  decorateDocumentDraft,
+  decorateKnowledgeMap,
+  normalizeCollections,
+  normalizePersonaRef,
+  publicPersonaCatalog,
+  resolvePersona
+} = require('./persona-registry.cjs');
 const { loadSafeSnapshot } = require('./key-migration.cjs');
 const { createUpdateManager } = require('./updater.cjs');
 const {
@@ -64,41 +75,24 @@ const handleIpc = createIpcRegistrar(ipcMain, () => mainWindow);
 updateManager = createUpdateManager({ app, getMainWindow: () => mainWindow });
 updateManager.initialize();
 const { callModel, aggregateUsageRecords } = createModelProvider(() => getSecretStore().getApiKey());
+const agentRuntime = createAgentRuntime({
+  callModel,
+  agentRegistry: AGENT_REGISTRY,
+  extractJson,
+  normalizeAgentOutput,
+  validateAgentOutput,
+  isAgentOutputError,
+  markAgentOutputParseError
+});
 
 async function runAgent(
   settings,
   agentId,
   userContent,
   operation,
-  options: { json?: boolean } = {}
+  options: { json?: boolean; personaRef?: { id: string; version: number } } = {}
 ) {
-  const agent = AGENT_REGISTRY[agentId];
-  if (!agent) {
-    throw new Error(`Unknown agent: ${agentId}`);
-  }
-  const modelResult = await callModel(
-    settings,
-    agent.system,
-    [{ role: 'user', content: userContent }],
-    operation
-  );
-  let json = null;
-  if (options.json) {
-    try {
-      json = normalizeAgentOutput(agentId, extractJson(modelResult.content));
-    } catch (error) {
-      if (isAgentOutputError(error)) throw error;
-      throw markAgentOutputParseError(error, agentId);
-    }
-  }
-  if (options.json) validateAgentOutput(agentId, json);
-  return {
-    agentId,
-    agentName: agent.name,
-    content: modelResult.content,
-    json,
-    usageRecord: modelResult.usageRecord
-  };
+  return agentRuntime.runAgent(settings, agentId, userContent, operation, options);
 }
 
 function sendMarkdownImportProgress(event, progress) {
@@ -111,7 +105,7 @@ function sendMarkdownImportProgress(event, progress) {
   });
 }
 
-function createAgentJob(projectBrief, sourceManifest, mode = 'fast', estimatedCalls = 0) {
+function createAgentJob(projectBrief, sourceManifest, mode = 'fast', estimatedCalls = 0, personaRef = null, operation = 'import') {
   const id = `agent_run_${randomUUID()}`;
   const createdAt = new Date().toISOString();
   const job = {
@@ -125,6 +119,10 @@ function createAgentJob(projectBrief, sourceManifest, mode = 'fast', estimatedCa
     estimatedCalls,
     callBudget: Math.max(estimatedCalls * 2, 1),
     actualCalls: 0,
+    personaId: personaRef?.id || 'learning-notes',
+    personaVersion: Number(personaRef?.version || 1),
+    operation,
+    executionProfile: mode === 'focused-note' ? 'focused' : mode,
     steps: []
   };
   agentJobRuns.set(id, job);
@@ -392,6 +390,13 @@ async function runNoteGenerationTask(sender, task, settings) {
   let pulse = null;
   const usageRecords = [];
   try {
+    const persona = resolvePersona(task.personaRef, {
+      allowDefault: false,
+      operation: 'generate',
+      executionProfile: 'focused',
+      provider: settings?.provider || 'local'
+    });
+    settings = { ...settings, __personaRef: { id: persona.id, version: persona.version } };
     sendNoteGenerationProgress(sender, task, {
       stage: 'preparing',
       message: '正在提炼核心问题与笔记范围',
@@ -422,7 +427,7 @@ async function runNoteGenerationTask(sender, task, settings) {
         '不得大段复制用户输入；引用只保留支撑核心问题所需的短证据。',
         '输出中文 JSON，不要输出 Markdown 包裹。'
       ];
-      const job = createAgentJob(projectBrief, sourceManifest, 'focused-note', 4);
+      const job = createAgentJob(projectBrief, sourceManifest, 'focused-note', 4, task.personaRef, 'generate');
       const planResult = await runAgentStep(
         settings,
         job.id,
@@ -477,6 +482,16 @@ async function runNoteGenerationTask(sender, task, settings) {
         percent: 78
       });
       const localQuality = localSingleNoteQualityReport(task.input, focusPlan, draft);
+      const personaIssues = localPersonaQualityIssues(task.input, draft, persona);
+      if (personaIssues.length) {
+        localQuality.ok = false;
+        localQuality.issues.push(...personaIssues);
+        localQuality.score = Math.max(30, localQuality.score - personaIssues.length * 8);
+        localQuality.rewriteInstruction = [
+          localQuality.rewriteInstruction,
+          `Persona 专业质量要求：${personaIssues.join('；')}`
+        ].filter(Boolean).join(' ');
+      }
       let quality = localQuality;
       try {
         const criticResult = await runAgentStep(
@@ -531,7 +546,7 @@ async function runNoteGenerationTask(sender, task, settings) {
         rewritten = true;
       }
       const sanitized = sanitizeFocusedNoteDraft(task.input, focusPlan, draft, fallback);
-      draft = sanitized.draft;
+      draft = decorateDocumentDraft(sanitized.draft, persona);
       updateAgentJobStatus(job.id, 'completed');
       result = {
         draft,
@@ -541,18 +556,23 @@ async function runNoteGenerationTask(sender, task, settings) {
           : sanitized.changed
             ? '笔记已通过聚焦规划与质量评审，并清理了重复原文'
             : '笔记已通过聚焦规划与质量评审',
-        usageRecord: aggregateUsageRecords(usageRecords, settings, 'generate-note')
+        usageRecord: aggregateUsageRecords(usageRecords, settings, 'generate-note'),
+        personaRef: { id: persona.id, version: persona.version },
+        artifactTopology: 'single-document'
       };
     } catch (error) {
+      if (persona.requiresModelForProfessionalAnalysis) throw error;
       const message = error?.message === 'LOCAL_PROVIDER'
         ? '已使用本地兜底生成笔记'
         : `模型调用失败，已使用本地兜底：${error?.message || '未知错误'}`;
       if (error?.message !== 'LOCAL_PROVIDER') console.warn('Falling back to local note generation:', error);
       result = {
-        draft: localGeneratedNote(task.input),
+        draft: decorateDocumentDraft(localGeneratedNote(task.input), persona),
         usedFallback: true,
         message,
-        usageRecord: aggregateUsageRecords(usageRecords, settings, 'generate-note')
+        usageRecord: aggregateUsageRecords(usageRecords, settings, 'generate-note'),
+        personaRef: { id: persona.id, version: persona.version },
+        artifactTopology: 'single-document'
       };
     }
 
@@ -1264,6 +1284,7 @@ function normalizeCoreNoteDraft(value, noteTask, topicPlan, subject, evidencePac
     cases: asStringList(source.cases),
     pitfalls: asStringList(source.pitfalls),
     interviewQuestions: asStringList(source.interviewQuestions),
+    collections: normalizeCollections(source.collections),
     usedEvidenceIds: normalizeIdList(source.usedEvidenceIds, allowedIds)
   };
 }
@@ -1527,7 +1548,14 @@ async function runMultiAgentMarkdownImport(
   const projectBrief = createProjectBrief(fileName, markdown);
   const sourceManifest = sourceManifestFor(fileName, chunks);
   const globalConstraints = globalImportConstraints(projectBrief);
-  const job = createAgentJob(projectBrief, sourceManifest, 'fast', estimatedImportCalls('fast', chunks.length));
+  const job = createAgentJob(
+    projectBrief,
+    sourceManifest,
+    'fast',
+    estimatedImportCalls('fast', chunks.length),
+    settings.__personaRef,
+    'import'
+  );
   const progress = (value) => onProgress({ ...value, runId: job.id });
   const usageRecords = [];
   const evidenceBatches = [];
@@ -1949,7 +1977,8 @@ function normalizeMarkdownImportDraft(value, fileName, markdown) {
     pitfalls: asStringList(draft?.pitfalls).length ? asStringList(draft.pitfalls) : fallbackDraft.pitfalls,
     interviewQuestions: asStringList(draft?.interviewQuestions).length
       ? asStringList(draft.interviewQuestions)
-      : fallbackDraft.interviewQuestions
+      : fallbackDraft.interviewQuestions,
+    collections: normalizeCollections(draft?.collections)
   });
 
   const root = normalizeDraft(source, fallback);
@@ -2112,7 +2141,8 @@ function normalizeNoteDraftForTopic(value, fallbackDraft, subject, topic) {
     pitfalls: asStringList(source.pitfalls).length ? asStringList(source.pitfalls) : asStringList(fallback.pitfalls),
     interviewQuestions: asStringList(source.interviewQuestions).length
       ? asStringList(source.interviewQuestions)
-      : asStringList(fallback.interviewQuestions)
+      : asStringList(fallback.interviewQuestions),
+    collections: normalizeCollections(source.collections)
   };
   const fallbackSubNotes = Array.isArray(fallback.subNotes) ? fallback.subNotes : [];
   const sourceSubNotes = Array.isArray(source.subNotes) ? source.subNotes : [];
@@ -2323,7 +2353,8 @@ function normalizeDistillationPatch(value, note, memorySummary, messages) {
     pitfalls: asStringList(source.pitfalls),
     interviewQuestions: asStringList(source.interviewQuestions).length
       ? asStringList(source.interviewQuestions)
-      : fallback.interviewQuestions
+      : fallback.interviewQuestions,
+    collections: normalizeCollections(source.collections)
   };
 }
 
@@ -2470,7 +2501,14 @@ async function runDeepAgentMarkdownImport(settings, fileName, markdown, chunks, 
   const projectBrief = createProjectBrief(fileName, markdown);
   const sourceManifest = sourceManifestFor(fileName, chunks);
   const globalConstraints = globalImportConstraints(projectBrief);
-  const job = createAgentJob(projectBrief, sourceManifest, 'deep', estimatedImportCalls('deep', chunks.length));
+  const job = createAgentJob(
+    projectBrief,
+    sourceManifest,
+    'deep',
+    estimatedImportCalls('deep', chunks.length),
+    settings.__personaRef,
+    'import'
+  );
   const usageRecords = [];
   let completedChunks = 0;
   onProgress({
@@ -2697,6 +2735,7 @@ handleIpc('app:get-update-state', () => updateManager.getState());
 handleIpc('app:check-for-updates', () => updateManager.checkForUpdates());
 handleIpc('app:download-update', () => updateManager.downloadUpdate());
 handleIpc('app:install-update', () => updateManager.installUpdate());
+handleIpc('ai:list-personas', () => publicPersonaCatalog());
 handleIpc('data:load-snapshot', () => loadRendererSnapshot());
 handleIpc('data:apply-changes', (_event, payload) => getStorage().applyChanges(payload));
 handleIpc('data:flush', () => getStorage().flushData());
@@ -2775,6 +2814,7 @@ handleIpc('ai:start-note-generation', (event, payload) => {
     percent: 4,
     input: String(payload.input || '').trim(),
     targetSubject: String(payload.targetSubject || '').trim(),
+    personaRef: normalizePersonaRef(payload.personaRef, false),
     updatedAt: new Date().toISOString()
   };
   noteGenerationTasks.set(taskId, task);
@@ -2851,8 +2891,16 @@ handleIpc('ai:start-markdown-import', async (event, payload) => {
   const selectionId = String(payload?.selectionId || '');
   const selection = markdownSelections.get(selectionId);
   if (!selection || selection.expiresAt < Date.now()) throw new Error('文件选择已过期，请重新选择');
-  const settings = payload?.settings || {};
+  let settings = payload?.settings || {};
   const requestedMode = ['fast', 'deep', 'offline'].includes(payload?.mode) ? payload.mode : 'fast';
+  const persona = resolvePersona(payload?.personaRef, {
+    allowDefault: false,
+    operation: 'import',
+    executionProfile: requestedMode,
+    provider: settings.provider || 'local'
+  });
+  const personaRef = { id: persona.id, version: persona.version };
+  settings = { ...settings, __personaRef: personaRef };
   const mode = (settings.provider || 'local') === 'local' ? 'offline' : requestedMode;
   const abortController = new AbortController();
   selection.abortController = abortController;
@@ -2883,7 +2931,10 @@ handleIpc('ai:start-markdown-import', async (event, payload) => {
       percent: 8
     });
     if (mode === 'offline') {
-      const knowledgeMap = localMarkdownKnowledgeMap(selection.fileName, selection.markdown);
+      const knowledgeMap = decorateKnowledgeMap(
+        localMarkdownKnowledgeMap(selection.fileName, selection.markdown),
+        persona
+      );
       progress({
         stage: 'normalizing',
         phaseTitle: '检查并完善笔记',
@@ -2895,13 +2946,25 @@ handleIpc('ai:start-markdown-import', async (event, payload) => {
         actualCalls: 0,
         canCancel: false
       });
-      return { fileName: selection.fileName, knowledgeMap, usedFallback: true, message: '离线整理、未做深度推理', mode, actualCalls: 0 };
+      return {
+        fileName: selection.fileName,
+        knowledgeMap,
+        usedFallback: true,
+        message: '离线整理、未做深度推理',
+        mode,
+        actualCalls: 0,
+        personaRef,
+        artifactTopology: persona.importTopology
+      };
     }
     const result = mode === 'deep'
       ? await runDeepAgentMarkdownImport(settings, selection.fileName, selection.markdown, selection.chunks, progress, () => canceledImports.has(selectionId))
       : await runMultiAgentMarkdownImport(settings, selection.fileName, selection.markdown, selection.headings, selection.chunks, progress);
     if (canceledImports.has(selectionId)) throw new Error('IMPORT_CANCELED');
-    const knowledgeMap = normalizeSubjectKnowledgeMap(result.knowledgeMap, selection.fileName, selection.markdown);
+    const knowledgeMap = decorateKnowledgeMap(
+      normalizeSubjectKnowledgeMap(result.knowledgeMap, selection.fileName, selection.markdown),
+      persona
+    );
     progress({
       runId: result.runId,
       stage: 'normalizing',
@@ -2924,7 +2987,9 @@ handleIpc('ai:start-markdown-import', async (event, payload) => {
       usageRecord: result.usageRecord,
       mode,
       runId: result.runId,
-      actualCalls: result.actualCalls
+      actualCalls: result.actualCalls,
+      personaRef,
+      artifactTopology: persona.importTopology
     };
   } catch (error) {
     if (error?.message === 'IMPORT_CANCELED') {
@@ -2956,13 +3021,18 @@ handleIpc('ai:chat-with-note', async (_event, payload) => {
   const context = payload?.context || '';
   const history = Array.isArray(payload?.history) ? payload.history.slice(-6) : [];
   const memorySummary = String(payload?.memorySummary || '').trim();
-  const system = [
+  const persona = resolvePersona(payload?.personaRef, {
+    allowDefault: false,
+    operation: 'chat',
+    provider: settings.provider || 'local'
+  });
+  const system = composePersonaSystem(persona, [
     '你是学习笔记对话助手。',
     '你必须优先基于“当前笔记”和“RAG检索片段”回答。',
     '如果提供了“阶段性对话记忆”，把它当作历史上下文，但不要逐字复述。',
     '如果上下文不足，要明确说明缺口，并给出下一步学习建议。',
     '回答使用中文，结构清晰，避免编造来源。'
-  ].join('\n');
+  ].join('\n'), 'chat');
   const messages = [
     {
       role: 'user',
@@ -3008,13 +3078,18 @@ handleIpc('ai:summarize-conversation', async (_event, payload) => {
   const note = payload?.note || {};
   const previousSummary = String(payload?.previousSummary || '').trim();
   const messages = Array.isArray(payload?.messages) ? payload.messages.slice(-14) : [];
-  const system = [
+  const persona = resolvePersona(payload?.personaRef, {
+    allowDefault: false,
+    operation: 'memory',
+    provider: settings.provider || 'local'
+  });
+  const system = composePersonaSystem(persona, [
     '你是学习型 Agent 的对话记忆管理器。',
     '任务：把围绕同一篇笔记的多轮对话压缩成稳定记忆，供后续 RAG 对话继续使用。',
     '保留：用户已确认的理解、关键定义、边界条件、例子、仍未解决的问题、适合写回笔记的要点。',
     '删除：寒暄、重复表达、模型过程性措辞、无关细节。',
     '用中文输出 180 到 320 字的纯文本摘要，不要输出 Markdown 标题。'
-  ].join('\n');
+  ].join('\n'), 'memory');
   const userContent = [
     `当前笔记标题：${note.title || note.topic || '未命名笔记'}`,
     `当前笔记摘要：${note.summary || ''}`,
@@ -3056,7 +3131,12 @@ handleIpc('ai:distill-conversation-to-note', async (_event, payload) => {
   const note = payload?.note || {};
   const memorySummary = String(payload?.memorySummary || '').trim();
   const messages = Array.isArray(payload?.messages) ? payload.messages.slice(-18) : [];
-  const system = [
+  const persona = resolvePersona(payload?.personaRef, {
+    allowDefault: false,
+    operation: 'distill',
+    provider: settings.provider || 'local'
+  });
+  const system = composePersonaSystem(persona, [
     '你是专业的学习笔记整理 Agent。',
     '任务：从当前笔记相关对话中提取“应该写回笔记”的增量内容。',
     '不要重复当前笔记已有内容；只提取新解释、新例子、边界条件、易错点、可复习问题。',
@@ -3064,8 +3144,9 @@ handleIpc('ai:distill-conversation-to-note', async (_event, payload) => {
     'JSON 字段：summaryAppend, sections, tags, cases, pitfalls, interviewQuestions。',
     'sections 每项包含 heading、content 和 blocks；blocks 使用 paragraph、bulletList、orderedList、table 语义块。',
     '并列项用 bulletList、步骤用 orderedList、共同维度的方案对比用 table；关键术语可适量 bold，每小节最多 3 处 highlight。',
-    '所有数组字段都是字符串数组，只有 blocks 按上述语义结构输出。'
-  ].join('\n');
+    '所有数组字段都是字符串数组，只有 blocks 按上述语义结构输出。',
+    '非学习 Persona 还必须输出 collections，每项包含 id、title、items。'
+  ].join('\n'), 'distill');
   const userContent = [
     `当前笔记：${JSON.stringify(plainNoteForModel(note))}`,
     memorySummary ? `阶段性对话记忆：\n${memorySummary}` : '',
@@ -3082,6 +3163,9 @@ handleIpc('ai:distill-conversation-to-note', async (_event, payload) => {
     const raw = modelResult.content;
     const parsed = extractJson(raw);
     const patch = normalizeDistillationPatch(parsed, note, memorySummary, messages);
+    if (!patch.collections.length) {
+      patch.collections = decorateDocumentDraft(patch, persona).collections;
+    }
     return {
       patch,
       memorySummary: memorySummary || localConversationMemory(note, '', messages),
@@ -3098,7 +3182,10 @@ handleIpc('ai:distill-conversation-to-note', async (_event, payload) => {
     }
     const summary = memorySummary || localConversationMemory(note, '', messages);
     return {
-      patch: localDistillationPatch(note, summary, messages),
+      patch: {
+        ...localDistillationPatch(note, summary, messages),
+        collections: decorateDocumentDraft(localDistillationPatch(note, summary, messages), persona).collections
+      },
       memorySummary: summary,
       usedFallback: true,
       message

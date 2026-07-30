@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('learnAgent', {
   retrieveContext: (payload) => ipcRenderer.invoke('data:retrieve-context', payload),
   exportSyncPackage: () => ipcRenderer.invoke('sync:export-package'),
   importSyncPackage: () => ipcRenderer.invoke('sync:import-package'),
+  listAgentPersonas: () => ipcRenderer.invoke('ai:list-personas'),
   startNoteGeneration: (payload) => ipcRenderer.invoke('ai:start-note-generation', payload),
   onNoteGenerationProgress: (handler) => {
     const listener = (_event, progress) => handler(progress);

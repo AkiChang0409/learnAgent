@@ -1,3 +1,5 @@
+const { resolvePersona } = require('./persona-registry.cjs');
+
 function createIpcRegistrar(ipcMain, getMainWindow) {
   return function handleIpc(channel, handler) {
     ipcMain.handle(channel, (event, ...args) => {
@@ -43,6 +45,20 @@ function validatePayload(channel, args) {
           throw new Error(`${key} upsert 包含缺失或重复主键`);
         }
         ids.add(item.id);
+        if (key === 'notes') {
+          resolvePersona({ id: item.personaId || 'learning-notes', version: item.personaVersion || 1 });
+          if (item.collections !== undefined && (!Array.isArray(item.collections) || item.collections.length > 8)) {
+            throw new Error('笔记动态集合格式无效');
+          }
+          for (const collection of item.collections || []) {
+            if (!collection || typeof collection.id !== 'string' || collection.id.length > 80
+              || typeof collection.title !== 'string' || collection.title.length > 80
+              || !Array.isArray(collection.items) || collection.items.length > 30
+              || collection.items.some((value) => typeof value !== 'string' || value.length > 20_000)) {
+              throw new Error('笔记动态集合格式无效');
+            }
+          }
+        }
       }
       if (deleteIds.some((id) => typeof id !== 'string' || !id) || new Set(deleteIds).size !== deleteIds.length) {
         throw new Error(`${key} deleteIds 格式无效`);
@@ -64,6 +80,12 @@ function validatePayload(channel, args) {
     requireObject();
     if (typeof payload.selectionId !== 'string' || payload.selectionId.length > 200) throw new Error('selectionId 格式无效');
     if (!['fast', 'deep', 'offline'].includes(payload.mode)) throw new Error('导入模式无效');
+    resolvePersona(payload.personaRef, {
+      allowDefault: false,
+      operation: 'import',
+      executionProfile: payload.mode,
+      provider: payload.settings?.provider || 'local'
+    });
   }
   if (channel === 'ai:cancel-markdown-import') {
     requireObject();
@@ -77,6 +99,12 @@ function validatePayload(channel, args) {
     if (typeof payload.targetSubject !== 'string' || payload.targetSubject.length > 200) {
       throw new Error('目标学科格式无效');
     }
+    resolvePersona(payload.personaRef, {
+      allowDefault: false,
+      operation: 'generate',
+      executionProfile: 'focused',
+      provider: payload.settings?.provider || 'local'
+    });
   }
   if (channel === 'ai:start-emphasis-analysis') {
     requireObject();
@@ -96,7 +124,25 @@ function validatePayload(channel, args) {
       }
     }
   }
-  if (channel.startsWith('ai:') && !['ai:select-markdown-source', 'ai:start-markdown-import', 'ai:cancel-markdown-import'].includes(channel)) {
+  const personaOperationByChannel = {
+    'ai:chat-with-note': 'chat',
+    'ai:summarize-conversation': 'memory',
+    'ai:distill-conversation-to-note': 'distill'
+  };
+  if (personaOperationByChannel[channel]) {
+    requireObject();
+    resolvePersona(payload.personaRef, {
+      allowDefault: false,
+      operation: personaOperationByChannel[channel],
+      provider: payload.settings?.provider || 'local'
+    });
+  }
+  if (channel.startsWith('ai:') && ![
+    'ai:list-personas',
+    'ai:select-markdown-source',
+    'ai:start-markdown-import',
+    'ai:cancel-markdown-import'
+  ].includes(channel)) {
     requireObject();
   }
 }
