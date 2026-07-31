@@ -28,6 +28,9 @@ describe('Agent Persona registry', () => {
     expect(prompt.indexOf('平台边界')).toBeLessThan(prompt.indexOf('Job Description'));
     expect(prompt.indexOf('Job Description')).toBeLessThan(prompt.indexOf('STAGE_CONTRACT'));
     expect(prompt).toContain('禁止生成个人匹配分数');
+    expect(prompt).toContain('岗位概览、主要工作、职位要求、核心技术要求解释、福利与其他信息');
+    expect(prompt).toContain('JD 未说明');
+    expect(prompt).toContain('没有网页浏览能力');
   });
 
   it('rejects unknown, unsupported and model-less professional modes', () => {
@@ -49,7 +52,7 @@ describe('Agent Persona registry', () => {
     const jd = api.decorateDocumentDraft(draft, api.PERSONA_REGISTRY['job-description-analyst']);
     const project = api.decorateDocumentDraft(draft, api.PERSONA_REGISTRY['codebase-technical-analyst']);
     expect(learning.collections.map((item: any) => item.title)).toContain('案例');
-    expect(jd.collections.map((item: any) => item.title)).toContain('核心要求');
+    expect(jd.collections.map((item: any) => item.title)).toContain('岗位关键信息');
     expect(project.collections.map((item: any) => item.title)).toContain('代码证据');
     expect(new Set([learning.summaryLabel, jd.summaryLabel, project.summaryLabel]).size).toBe(3);
   });
@@ -66,7 +69,13 @@ describe('Agent Persona registry', () => {
     const project = api.decorateKnowledgeMap(map, api.PERSONA_REGISTRY['codebase-technical-analyst']);
     expect(jd.topics).toHaveLength(1);
     expect(jd.topics[0].notes).toHaveLength(1);
-    expect(jd.topics[0].notes[0].sections).toHaveLength(2);
+    expect(jd.topics[0].notes[0].sections.map((section: any) => section.heading)).toEqual([
+      '岗位概览',
+      '主要工作',
+      '职位要求',
+      '核心技术要求解释',
+      '福利与其他信息'
+    ]);
     expect(project.topics).toHaveLength(2);
   });
 });

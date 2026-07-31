@@ -44,3 +44,12 @@ Agent Persona 是 LearnAgent 中经过编译、版本化和测试的专业能力
 - 动态集合进入存储、同步、搜索与 RAG。
 - 生成、导入、问答、记忆和回写保持同一个 Persona 版本。
 - `npm run check`、`npm run test:unit`、`npm run build` 和 Electron smoke 全部通过。
+
+## 示例：由 Skill 编译为一个 JD Persona
+
+`analyze-job-description` Skill 被编译为唯一的 `job-description-analyst@1`，没有拆成多个用户可见模式。Persona 内部自动使用 JD 专属的完整信息规划、五节写作、质量评审和最多一次整体重写流程。
+
+- 固定产物为：岗位概览、主要工作、职位要求、核心技术要求解释、福利与其他信息，以及最多两句话的“一句话判断”。
+- 原文的 required / preferred / optional 强度、薪资、地点、签证和工作形式必须保留；缺失项写“JD 未说明”。
+- 当前桌面 Agent Runtime 没有浏览器工具，因此 Skill 的在线调研步骤被编译为安全降级：只有输入自带可信公开来源时才能使用，否则形成“待调研项”，不能伪造公司、行业、技术或市场薪酬结论。
+- Persona 仍贯穿生成、Markdown 导入、当前页问答、阶段记忆与对话回写。

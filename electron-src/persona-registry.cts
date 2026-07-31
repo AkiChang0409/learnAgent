@@ -29,29 +29,31 @@ const PERSONA_REGISTRY = Object.freeze({
     id: 'job-description-analyst',
     version: 1,
     name: 'Job Description 分析',
-    description: '把岗位描述转成职责、能力链、显隐性要求与申请准备方案。',
-    summaryLabel: '岗位分析摘要',
+    description: '提取岗位事实、职责与要求，并解释决定性技术在岗位中的实际用途。',
+    summaryLabel: '一句话判断',
     operations: ['generate', 'import', 'chat', 'memory', 'distill'],
     executionProfiles: ['focused', 'fast', 'deep'],
     importTopology: 'single-document',
     requiresModelForProfessionalAnalysis: true,
     collectionBlueprint: [
-      { id: 'core-requirements', title: '核心要求' },
-      { id: 'implicit-signals', title: '隐含信号与风险' },
-      { id: 'application-prep', title: '申请准备' },
-      { id: 'interview-questions', title: '面试追问' }
+      { id: 'job-facts', title: '岗位关键信息' },
+      { id: 'missing-information', title: 'JD 未说明与待确认' },
+      { id: 'research-questions', title: '待调研项' }
     ],
     domainSystem: [
       '当前 Agent Persona 是“Job Description 分析”。',
-      '围绕岗位使命、主要交付物、职责到能力链、必须项、加分项、软技能、工具要求和面试考察点组织内容。',
-      '严格区分 JD 明示事实、由多条要求得到的合理推断、以及无法确认的信息。',
-      '没有候选人简历或经历时，禁止生成个人匹配分数或声称候选人具备某项能力；改为列出待补充信息与准备建议。',
-      '不要把岗位职责重新排版成所谓分析。正文应说明每项要求为何存在、会形成什么交付物、面试如何验证。',
+      '完整阅读 JD，提取职位与级别、薪资币种和周期、奖金股权、公司业务、团队、地点与工作形式、雇佣类型、职责交付物、技术、学历、经验、语言、认证、领域和福利约束。',
+      '严格保留 required、preferred、optional 的原始强度；缺失或歧义信息写“JD 未说明”，禁止猜测。',
+      '正文固定为岗位概览、主要工作、职位要求、核心技术要求解释、福利与其他信息五节；摘要是最多两句话的“一句话判断”。',
+      '职责合并成 3 到 6 项真实工作；只解释 2 到 6 个决定性技术或技术组，并说明它是什么、所属领域、在本岗位中的实际用途。',
+      '没有候选人简历或经历时，禁止生成个人匹配分数或声称候选人具备某项能力；只能描述适合该岗位的通用候选人画像。',
+      '当前应用运行时没有网页浏览能力。除非输入已经提供可信公开来源，否则不得声称完成了公开资料调研；需要核实的公司、行业、技术或市场薪酬放入待调研项。市场薪酬不得写成 JD 提供的薪资。',
+      '不要把岗位职责重新排版成所谓分析，不要把“熟悉/了解”升级为“精通/必须”，并保留数字、地点、签证、截止日期和工作形式等决定性细节。',
       'JSON 除通用笔记字段外应包含 collections；每项为 {id,title,items}。'
     ].join('\n'),
-    chatSystem: '以资深招聘经理和职业分析顾问身份回答，明确事实、推断和待确认信息，不虚构候选人经历。',
-    memorySystem: '记忆应保留目标岗位、已确认的候选人经历、能力缺口和仍待确认的信息，不把模型建议记成事实。',
-    distillSystem: '写回应形成岗位要求、隐含信号、申请准备和面试追问等集合；不得制造匹配度结论。'
+    chatSystem: '以资深招聘经理和岗位分析顾问身份回答；保留要求强度，明确 JD 原文、用户提供的公开资料和待确认信息，不虚构候选人经历或外部调研。',
+    memorySystem: '记忆应保留岗位事实、要求强度、已确认的候选人经历、JD 未说明项和待调研项，不把模型建议或市场信息记成 JD 事实。',
+    distillSystem: '写回内容应归入岗位关键信息、JD 未说明与待确认、待调研项；保留数字和要求强度，不得制造匹配度或公开资料结论。'
   }),
   'codebase-technical-analyst': Object.freeze({
     id: 'codebase-technical-analyst',
@@ -160,9 +162,9 @@ function legacyCollections(draft, persona) {
   const questions = Array.isArray(draft?.interviewQuestions) ? draft.interviewQuestions : [];
   if (persona.id === 'job-description-analyst') {
     return normalizeCollections([
-      { id: 'core-requirements', title: '核心要求', items: cases },
-      { id: 'implicit-signals', title: '隐含信号与风险', items: pitfalls },
-      { id: 'interview-questions', title: '面试追问', items: questions }
+      { id: 'job-facts', title: '岗位关键信息', items: cases },
+      { id: 'missing-information', title: 'JD 未说明与待确认', items: pitfalls },
+      { id: 'research-questions', title: '待调研项', items: questions }
     ]);
   }
   if (persona.id === 'codebase-technical-analyst') {
@@ -191,6 +193,50 @@ function decorateDocumentDraft(draft, persona) {
   };
 }
 
+const JD_SECTION_BLUEPRINT = Object.freeze([
+  { heading: '岗位概览', pattern: /岗位概览|岗位信息|职位信息|公司|薪资|地点|工作形式/ },
+  { heading: '主要工作', pattern: /主要工作|岗位职责|工作职责|职责|交付|工作内容/ },
+  { heading: '职位要求', pattern: /职位要求|任职要求|岗位要求|能力要求|学历|经验|领域知识/ },
+  { heading: '核心技术要求解释', pattern: /核心技术要求解释|核心技术|技术要求|技术解释|工具要求/ },
+  { heading: '福利与其他信息', pattern: /福利与其他信息|福利|待遇|其他信息|工作条件|签证|轮班|旅行/ }
+]);
+
+function firstTwoSentences(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const sentences = text.match(/[^。！？.!?]+[。！？.!?]?/g) || [text];
+  return sentences.slice(0, 2).join('').trim();
+}
+
+function canonicalizeJdDraft(draft) {
+  const sourceSections = Array.isArray(draft?.sections) ? draft.sections : [];
+  const buckets = new Map(JD_SECTION_BLUEPRINT.map((item) => [item.heading, []]));
+  const unmatched = [];
+  for (const section of sourceSections) {
+    const heading = String(section?.heading || '').trim();
+    const match = JD_SECTION_BLUEPRINT.find((item) => item.heading === heading)
+      || JD_SECTION_BLUEPRINT.find((item) => item.pattern.test(heading));
+    if (match) buckets.get(match.heading).push(section);
+    else if (String(section?.content || '').trim()) unmatched.push(section);
+  }
+  if (unmatched.length) buckets.get('主要工作').push(...unmatched);
+  const sections = JD_SECTION_BLUEPRINT.map(({ heading }) => {
+    const matches = buckets.get(heading) || [];
+    if (!matches.length) {
+      const suffix = heading === '福利与其他信息' ? '具体福利' : heading;
+      return { heading, content: `JD 未说明${suffix}` };
+    }
+    const content = matches.map((item) => String(item?.content || '').trim()).filter(Boolean).join('\n\n');
+    const only = matches.length === 1 ? matches[0] : null;
+    return {
+      heading,
+      content: content || `JD 未说明${heading}`,
+      ...(only?.blocks ? { blocks: only.blocks } : {})
+    };
+  });
+  return { ...draft, summary: firstTwoSentences(draft?.summary), sections };
+}
+
 function decorateKnowledgeMap(map, persona) {
   const sourceTopics = Array.isArray(map?.topics) ? map.topics : [];
   const decoratedTopics = sourceTopics.map((topic) => ({
@@ -217,7 +263,7 @@ function decorateKnowledgeMap(map, persona) {
     }
   }
   const first = allNotes[0]?.note || {};
-  const single = decorateDocumentDraft({
+  const singleDraft = {
     ...first,
     title: map?.title || first.title || '岗位分析',
     subject: map?.subject || first.subject || '职业发展',
@@ -226,7 +272,11 @@ function decorateKnowledgeMap(map, persona) {
     summary: map?.overview || first.summary || '',
     sections: sections.length ? sections : first.sections || [],
     collections: normalizeCollections(Array.from(collectionMap.values()))
-  }, persona);
+  };
+  const single = decorateDocumentDraft(
+    persona.id === 'job-description-analyst' ? canonicalizeJdDraft(singleDraft) : singleDraft,
+    persona
+  );
   return {
     ...map,
     topics: [{ title: '岗位分析', summary: single.summary, notes: [single] }]
@@ -244,6 +294,7 @@ module.exports = {
   DEFAULT_PERSONA_REF,
   PERSONA_REGISTRY,
   composePersonaSystem,
+  canonicalizeJdDraft,
   decorateDocumentDraft,
   decorateKnowledgeMap,
   legacyCollections,

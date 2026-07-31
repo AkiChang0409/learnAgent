@@ -103,4 +103,14 @@ describe('agent output boundary', () => {
     })).not.toThrow();
     expect(() => validateAgentOutput('note.quality-critic', { ok: 'yes', issues: [] })).toThrow('ok');
   });
+
+  it('validates the dedicated JD planner, writer and critic contracts', () => {
+    const plan = normalizeAgentOutput('jd.analysis-planner', {
+      scopeIn: '完整岗位事实', scopeOut: [], keyPoints: [], reasoningQuestions: [], extensionDirections: [], evidenceItems: []
+    });
+    expect(plan.scopeIn).toEqual(['完整岗位事实']);
+    expect(() => validateAgentOutput('jd.analysis-planner', plan)).not.toThrow();
+    expect(() => validateAgentOutput('jd.analysis-writer', { sections: [] })).not.toThrow();
+    expect(() => validateAgentOutput('jd.analysis-critic', { ok: true, issues: [] })).not.toThrow();
+  });
 });

@@ -1,7 +1,9 @@
 const STRING_ARRAY_FIELDS: Record<string, string[]> = {
   'note.enricher': ['cases', 'pitfalls', 'interviewQuestions', 'suggestedTags', 'usedEvidenceIds'],
   'note.focus-planner': ['scopeIn', 'scopeOut', 'keyPoints', 'reasoningQuestions', 'extensionDirections'],
-  'note.quality-critic': ['issues']
+  'note.quality-critic': ['issues'],
+  'jd.analysis-planner': ['scopeIn', 'scopeOut', 'keyPoints', 'reasoningQuestions', 'extensionDirections'],
+  'jd.analysis-critic': ['issues']
 };
 
 function textFromAgentValue(value) {
@@ -67,8 +69,8 @@ function validateAgentOutput(agentId, value) {
       throw agentOutputError(`${agentId} 输出字段 ${key} 必须是数组`, { agentId, field: key });
     }
   };
-  if (agentId === 'note.generator') requireArray('sections');
-  if (agentId === 'note.focus-planner') {
+  if (agentId === 'note.generator' || agentId === 'jd.analysis-writer') requireArray('sections');
+  if (agentId === 'note.focus-planner' || agentId === 'jd.analysis-planner') {
     requireArray('scopeIn');
     requireArray('scopeOut');
     requireArray('keyPoints');
@@ -76,7 +78,7 @@ function validateAgentOutput(agentId, value) {
     requireArray('extensionDirections');
     requireArray('evidenceItems');
   }
-  if (agentId === 'note.quality-critic') {
+  if (agentId === 'note.quality-critic' || agentId === 'jd.analysis-critic') {
     if (typeof value.ok !== 'boolean') {
       throw agentOutputError(`${agentId} 输出字段 ok 必须是布尔值`, { agentId, field: 'ok' });
     }

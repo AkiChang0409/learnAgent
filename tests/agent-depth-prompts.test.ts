@@ -27,4 +27,11 @@ describe('Markdown import depth contracts', () => {
     expect(registry['note.generator'].system).toContain('只围绕 focusQuestion');
     expect(registry['note.quality-critic'].system).toContain('大段照抄');
   });
+
+  it('compiles JD Analysis into one Persona with a dedicated internal workflow', () => {
+    expect(registry['jd.analysis-planner'].system).toContain('required、preferred、optional');
+    expect(registry['jd.analysis-writer'].system).toContain('岗位概览、主要工作、职位要求、核心技术要求解释、福利与其他信息');
+    expect(registry['jd.analysis-writer'].system).toContain('当前运行时不能浏览网页');
+    expect(registry['jd.analysis-critic'].system).toContain('市场薪酬不得冒充岗位开价');
+  });
 });

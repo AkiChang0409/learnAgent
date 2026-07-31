@@ -22,13 +22,34 @@ describe('Persona-specific local quality gates', () => {
 
   it('accepts an evidence-bounded JD analysis', () => {
     const issues = localPersonaQualityIssues('岗位职责：建设数据平台。任职要求：熟悉 SQL。', {
-      summary: '岗位目标是交付稳定的数据平台。',
+      summary: '岗位本质是建设稳定的数据平台，适合具备数据工程基础并能承担交付责任的候选人。',
       sections: [
-        { heading: '职责与交付', content: 'JD 原文明示建设职责，对应交付物是数据平台。' },
-        { heading: '能力链', content: '明确要求 SQL；云平台经验属于合理推断，仍待确认。' }
+        { heading: '岗位概览', content: '职位：JD 未说明\n薪资：JD 未说明\n公司：JD 未说明\n领域：数据工程\n工作地点/形式：JD 未说明' },
+        { heading: '主要工作', content: '- 工作职责：建设并交付稳定的数据平台。' },
+        { heading: '职位要求', content: '- 技术：熟悉 SQL。\n- 学历与经验：JD 未说明。\n- 领域知识：数据平台。' },
+        { heading: '核心技术要求解释', content: '**SQL｜领域：数据工程**：用于在本岗位中查询、转换和验证平台数据。' },
+        { heading: '福利与其他信息', content: 'JD 未说明具体福利' }
       ]
     }, { id: 'job-description-analyst' });
     expect(issues).toEqual([]);
+  });
+
+  it('rejects requirement inflation and fabricated public research', () => {
+    const issues = localPersonaQualityIssues('岗位要求：熟悉 SQL；Remote。加分项：AWS。', {
+      summary: '该岗位要求数据能力。',
+      sections: [
+        { heading: '岗位概览', content: '职位：工程师\n薪资：JD 未说明\n公司：某公司\n领域：数据\n工作地点/形式：现场' },
+        { heading: '主要工作', content: '工作职责：建设数据平台。' },
+        { heading: '职位要求', content: '必须精通 SQL。' },
+        { heading: '核心技术要求解释', content: 'SQL｜领域：数据，用于岗位查询。' },
+        { heading: '福利与其他信息', content: 'JD 未说明具体福利' }
+      ],
+      collections: [{ id: 'research', title: '研究', items: ['公开资料显示该公司高速增长。'] }]
+    }, { id: 'job-description-analyst' });
+    expect(issues.join('\n')).toContain('熟悉/了解');
+    expect(issues.join('\n')).toContain('外部调研');
+    expect(issues.join('\n')).toContain('preferred/optional');
+    expect(issues.join('\n')).toContain('远程工作形式');
   });
 
   it('requires project analysis to cover evidence, data flow and tradeoffs', () => {

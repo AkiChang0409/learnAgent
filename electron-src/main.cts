@@ -13,6 +13,7 @@ const { AGENT_REGISTRY } = require('./agent-registry.cjs');
 const { createAgentRuntime } = require('./agent-runtime.cjs');
 const { localPersonaQualityIssues } = require('./persona-quality.cjs');
 const {
+  canonicalizeJdDraft,
   composePersonaSystem,
   decorateDocumentDraft,
   decorateKnowledgeMap,
@@ -396,23 +397,29 @@ async function runNoteGenerationTask(sender, task, settings) {
       executionProfile: 'focused',
       provider: settings?.provider || 'local'
     });
+    const isJdPersona = persona.id === 'job-description-analyst';
+    const plannerAgentId = isJdPersona ? 'jd.analysis-planner' : 'note.focus-planner';
+    const writerAgentId = isJdPersona ? 'jd.analysis-writer' : 'note.generator';
+    const criticAgentId = isJdPersona ? 'jd.analysis-critic' : 'note.quality-critic';
     settings = { ...settings, __personaRef: { id: persona.id, version: persona.version } };
     sendNoteGenerationProgress(sender, task, {
       stage: 'preparing',
-      message: '正在提炼核心问题与笔记范围',
+      message: isJdPersona ? '正在提取岗位事实与要求强度' : '正在提炼核心问题与笔记范围',
       percent: 12
     });
     let result;
     try {
-      const fallback = localGeneratedNote(task.input);
+      const fallback = isJdPersona ? localJdAnalysisDraft(task.input) : localGeneratedNote(task.input);
       const inputMode = singleNoteInputMode(task.input);
       const projectBrief = {
         projectName: conciseNoteFocus(task.input),
-        projectType: '单篇聚焦笔记',
-        targetAudience: '深入学习与迁移应用',
+        projectType: isJdPersona ? '单篇 Job Description 专业分析' : '单篇聚焦笔记',
+        targetAudience: isJdPersona ? '需要快速理解岗位本质与要求的求职者' : '深入学习与迁移应用',
         targetSubject: task.targetSubject || inferSubject(task.input),
         inputMode,
-        qualityGoal: '只围绕一个核心问题生成一篇高质量笔记，禁止复制原始材料或堆砌无关知识点。'
+        qualityGoal: isJdPersona
+          ? '忠实覆盖完整 JD，保留要求强度和决定性细节，以五个固定章节生成简洁岗位分析，禁止猜测。'
+          : '只围绕一个核心问题生成一篇高质量笔记，禁止复制原始材料或堆砌无关知识点。'
       };
       const sourceManifest = [{
         sourceId: 'note_input',
@@ -420,7 +427,14 @@ async function runNoteGenerationTask(sender, task, settings) {
         fileType: inputMode,
         chunkCount: 1
       }];
-      const constraints = [
+      const constraints = isJdPersona ? [
+        '只生成一篇完整 JD 分析，不拆成知识地图或多个 Persona。',
+        '完整覆盖岗位概览、主要工作、职位要求、核心技术要求解释、福利与其他信息。',
+        '保留 required/preferred/optional 的原始强度；缺失项写“JD 未说明”。',
+        '当前运行时不能浏览网页；没有用户提供的可信来源时不得声称做过公开调研。',
+        '不得大段复制 JD，不得给无依据的匹配度或把市场薪资写成岗位薪资。',
+        '输出中文 JSON，不要输出 Markdown 包裹。'
+      ] : [
         '只生成一篇笔记，不拆成知识地图或多篇笔记。',
         '先收敛范围，再写正文；宁可少讲，也不要复制所有输入。',
         '材料事实、可推断结论和拓展理解必须明确区分。',
@@ -431,14 +445,16 @@ async function runNoteGenerationTask(sender, task, settings) {
       const planResult = await runAgentStep(
         settings,
         job.id,
-        'note.focus-planner',
+        plannerAgentId,
         buildAgentUserPrompt({
           projectBrief,
           sourceManifest,
           globalConstraints: constraints,
           task: { input: task.input, targetSubject: task.targetSubject, inputMode },
           evidence: undefined,
-          instruction: '生成一份 FocusPlan。只确定一个核心问题，并明确 scopeIn 与 scopeOut；不要写最终笔记。'
+          instruction: isJdPersona
+            ? '生成完整 JD Analysis Plan。覆盖整份岗位信息，保留要求强度，列出 JD 未说明和待调研项；不要写最终分析。'
+            : '生成一份 FocusPlan。只确定一个核心问题，并明确 scopeIn 与 scopeOut；不要写最终笔记。'
         }),
         'generate-note',
         { json: true }
@@ -448,7 +464,9 @@ async function runNoteGenerationTask(sender, task, settings) {
 
       sendNoteGenerationProgress(sender, task, {
         stage: 'generating',
-        message: `正在围绕“${clipText(focusPlan.focusQuestion, 34)}”深度写作`,
+        message: isJdPersona
+          ? '正在生成完整岗位分析与核心技术解释'
+          : `正在围绕“${clipText(focusPlan.focusQuestion, 34)}”深度写作`,
         percent: 38
       });
       let percent = 44;
@@ -459,14 +477,16 @@ async function runNoteGenerationTask(sender, task, settings) {
       const writerResult = await runAgentStep(
         settings,
         job.id,
-        'note.generator',
+        writerAgentId,
         buildAgentUserPrompt({
           projectBrief,
           sourceManifest,
           globalConstraints: constraints,
           task: { focusPlan },
           evidence: focusPlan.evidenceItems,
-          instruction: '根据 FocusPlan 写一篇完整笔记。严格排除 scopeOut，生成 4 到 6 个职责不同的小节，不要复述或重排原始材料。'
+          instruction: isJdPersona
+            ? '根据完整 JD Analysis Plan 写一篇分析。严格使用五个固定章节和最多两句话的一句话判断；缺失项写“JD 未说明”。'
+            : '根据 FocusPlan 写一篇完整笔记。严格排除 scopeOut，生成 4 到 6 个职责不同的小节，不要复述或重排原始材料。'
         }),
         'generate-note',
         { json: true }
@@ -481,9 +501,16 @@ async function runNoteGenerationTask(sender, task, settings) {
         message: '正在检查聚焦度、重复内容与解释深度',
         percent: 78
       });
-      const localQuality = localSingleNoteQualityReport(task.input, focusPlan, draft);
       const personaIssues = localPersonaQualityIssues(task.input, draft, persona);
-      if (personaIssues.length) {
+      const localQuality = isJdPersona
+        ? {
+            ok: personaIssues.length === 0,
+            score: personaIssues.length ? Math.max(35, 92 - personaIssues.length * 10) : 94,
+            issues: [...personaIssues],
+            rewriteInstruction: personaIssues.length ? `整体重写：${personaIssues.join('；')}` : ''
+          }
+        : localSingleNoteQualityReport(task.input, focusPlan, draft);
+      if (!isJdPersona && personaIssues.length) {
         localQuality.ok = false;
         localQuality.issues.push(...personaIssues);
         localQuality.score = Math.max(30, localQuality.score - personaIssues.length * 8);
@@ -497,14 +524,16 @@ async function runNoteGenerationTask(sender, task, settings) {
         const criticResult = await runAgentStep(
           settings,
           job.id,
-          'note.quality-critic',
+          criticAgentId,
           buildAgentUserPrompt({
             projectBrief,
             sourceManifest,
             globalConstraints: constraints,
             task: { focusPlan, draft: plainNoteForModel(draft) },
             evidence: focusPlan.evidenceItems,
-            instruction: '严格评审这篇单篇笔记。若范围混乱、复制材料、结构重复或解释浅显，必须判为不合格并给出整体重写指令。'
+            instruction: isJdPersona
+              ? '严格评审这篇 JD 分析的事实边界、要求强度、五节结构、决定性技术解释和缺失信息标记；任一项不合格都给出整体重写指令。'
+              : '严格评审这篇单篇笔记。若范围混乱、复制材料、结构重复或解释浅显，必须判为不合格并给出整体重写指令。'
           }),
           'generate-note',
           { json: true }
@@ -519,13 +548,13 @@ async function runNoteGenerationTask(sender, task, settings) {
       if (!quality.ok) {
         sendNoteGenerationProgress(sender, task, {
           stage: 'formatting',
-          message: '发现内容失焦或浅显，正在整体重写',
+          message: isJdPersona ? '发现事实边界或结构问题，正在整体重写' : '发现内容失焦或浅显，正在整体重写',
           percent: 88
         });
         const rewriteResult = await runAgentStep(
           settings,
           job.id,
-          'note.generator',
+          writerAgentId,
           buildAgentUserPrompt({
             projectBrief,
             sourceManifest,
@@ -535,7 +564,9 @@ async function runNoteGenerationTask(sender, task, settings) {
             instruction: [
               '这是一次整体重写，不是追加小节。',
               quality.rewriteInstruction || quality.issues.join('；'),
-              '删除原文复述、scopeOut 和重复内容，围绕 focusQuestion 重建 4 到 6 个小节的解释链。'
+              isJdPersona
+                ? '重建岗位概览、主要工作、职位要求、核心技术要求解释、福利与其他信息五节；缺失信息写“JD 未说明”，不要增加原文没有的事实。'
+                : '删除原文复述、scopeOut 和重复内容，围绕 focusQuestion 重建 4 到 6 个小节的解释链。'
             ].join('\n')
           }),
           'generate-note',
@@ -546,7 +577,8 @@ async function runNoteGenerationTask(sender, task, settings) {
         rewritten = true;
       }
       const sanitized = sanitizeFocusedNoteDraft(task.input, focusPlan, draft, fallback);
-      draft = decorateDocumentDraft(sanitized.draft, persona);
+      const finalDraft = isJdPersona ? canonicalizeJdDraft(sanitized.draft) : sanitized.draft;
+      draft = decorateDocumentDraft(finalDraft, persona);
       updateAgentJobStatus(job.id, 'completed');
       result = {
         draft,
@@ -901,6 +933,46 @@ function localGeneratedNote(input) {
       `请用自己的话说明“${topic}”的核心问题和机制，不要复述输入。`,
       `改变一个关键前提后，结论或流程会如何变化？`,
       `哪些内容是材料事实，哪些只是可推断或拓展理解？`
+    ]
+  };
+}
+
+function localJdAnalysisDraft(input) {
+  const source = String(input || '').trim();
+  const title = conciseNoteFocus(source).replace(/能力模型$/, '').trim() || 'Job Description 分析';
+  const sourceLine = (pattern) => source.split(/\r?\n/)
+    .map((line) => line.replace(/^\s*(?:#{1,6}|[-*+]\s*)/, '').trim())
+    .find((line) => pattern.test(line));
+  const fact = (pattern, missingLabel) => clipText(sourceLine(pattern) || `JD 未说明${missingLabel}`, 220);
+  return {
+    title,
+    subject: '职业发展',
+    topic: '岗位分析',
+    tags: ['Job Description', '岗位分析'],
+    summary: '这是一份基于 JD 原文的岗位事实整理；未明确的信息保持为待确认，不作猜测。',
+    summaryBlocks: [],
+    sections: [
+      {
+        heading: '岗位概览',
+        content: [
+          `职位：${fact(/职位|岗位|role|position/i, '职位')}`,
+          `薪资：${fact(/薪资|薪酬|salary|compensation|\$|¥|€|£/i, '薪资')}`,
+          `公司：${fact(/公司|company|about us/i, '公司信息')}`,
+          '领域：JD 未说明领域',
+          `工作地点/形式：${fact(/地点|办公|远程|混合|location|remote|hybrid|on-?site/i, '工作地点或形式')}`
+        ].join('\n')
+      },
+      { heading: '主要工作', content: 'JD 原文中的职责与交付物需要由专业分析阶段提炼；缺失项不得补写。' },
+      { heading: '职位要求', content: 'JD 原文中的技术、学历、经验与领域要求需要保留原始强度；JD 未说明的条件不得补写。' },
+      { heading: '核心技术要求解释', content: 'JD 未说明核心技术要求' },
+      { heading: '福利与其他信息', content: fact(/福利|奖金|股权|保险|假期|签证|轮班|旅行|benefit|bonus|equity|visa/i, '具体福利') }
+    ],
+    cases: [],
+    pitfalls: ['JD 未说明或存在歧义的信息需要待确认。'],
+    interviewQuestions: ['哪些公司、行业、技术或市场信息需要通过可信公开来源进一步核实？'],
+    collections: [
+      { id: 'missing-information', title: 'JD 未说明与待确认', items: ['未由原文明确的信息不得猜测。'] },
+      { id: 'research-questions', title: '待调研项', items: ['当前运行时不能联网；需要外部核实的内容应另行调研。'] }
     ]
   };
 }
